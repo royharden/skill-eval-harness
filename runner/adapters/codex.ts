@@ -5,29 +5,39 @@
 // Candidate invocation: codex exec --json --model <id> --sandbox workspace-write -- <prompt>
 // Candidate native skill root: <workspace>/.agents/skills/<frontmatter-name>/SKILL.md
 // A literal "$name" prefix is explicit-request, not forced-content and not proof of loading.
-// Injected-fragment exposure is not observable from trustworthy events: exposure stays unknown unless a completed,
-// successful (exit 0) read command names the exact SKILL.md path as a whole token.
+// Injected-fragment exposure is not observable from trustworthy events. Decision (recorded in STATUS.md): a native or
+// explicit-request treatment arm starts "unknown" (PLAN §4: missing events mean unknown) and becomes "observed" only
+// when a completed, successful (exit 0) read command names the installed SKILL.md; forced-content and non-skill
+// artifacts are "unsupported".
 
 import type { ArmDescriptor } from "../../supabase/functions/publish-run/domain/contracts.ts";
 import type { CandidateArtifact } from "../suite.ts";
 import { emptyParsedState, nonNegInt, type Adapter, type EventParser, type InvocationContext } from "./types.ts";
 
 const SKILL_ROOT = ".agents/skills";
-const READ_VERBS = /(^|[\s;&|("'])(cat|head|tail|sed|less|more|nl|awk|type|Get-Content|gc)(?=\s)/;
+const READ_VERBS = new Set(["cat", "head", "tail", "less", "more", "nl", "type", "get-content", "gc"]);
 
-function escapeRe(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * True when one command segment (split on ; & | and newlines) starts with a read verb (after an optional shell
+ * wrapper such as `bash -lc '...'`) and has the exact SKILL.md as an argument: workspace-relative, "./"-relative or
+ * the absolute path under this attempt's workspace. Redirections and in-place edits never count as reads.
+ */
+export function readsSkillFile(command: string, candidateName: string, workspace: string | null = null): boolean {
+  const rel = `${SKILL_ROOT}/${candidateName}/SKILL.md`;
+  const fold = (p: string) => (process.platform === "win32" ? p.toLowerCase() : p);
+  const accepted = new Set([rel, `./${rel}`]);
+  if (workspace) accepted.add(fold(`${workspace.replace(/\\/g, "/").replace(/\/$/, "")}/${rel}`));
+  const unwrapped = command.replace(/\\/g, "/").replace(/^\s*(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1\s*$/, "$2");
+  for (const segment of unwrapped.split(/[;&|\n]+/)) {
+    if (/[<>]|\s-i\b/.test(segment)) continue;
+    const words = segment.trim().split(/\s+/).map((w) => w.replace(/^['"]|['"]$/g, ""));
+    if (!words[0] || !READ_VERBS.has(words[0].toLowerCase())) continue;
+    if (words.slice(1).some((w) => accepted.has(w) || accepted.has(fold(w)))) return true;
+  }
+  return false;
 }
 
-/** True for a read command naming the exact SKILL.md path as a whole token (optionally under an absolute prefix). */
-export function readsSkillFile(command: string, candidateName: string): boolean {
-  const c = command.replace(/\\/g, "/");
-  const path = escapeRe(`${SKILL_ROOT}/${candidateName}/SKILL.md`);
-  const token = new RegExp(`(^|[\\s'"=])((?:\\./)?|[^\\s'"]*/)${path}(?=$|[\\s'"])`);
-  return READ_VERBS.test(c) && token.test(c);
-}
-
-export function codexParser(arm: ArmDescriptor, candidate: CandidateArtifact | null): EventParser {
+export function codexParser(arm: ArmDescriptor, candidate: CandidateArtifact | null, workspace: string | null = null): EventParser {
   const state = emptyParsedState();
   state.usage.semantics = "codex exec --json turn.completed.usage (hypothesis)";
   const unsupported = arm.arm_id === "baseline" || !candidate || candidate.kind !== "skill" || arm.exposure_mode === "forced-content";
@@ -73,7 +83,7 @@ export function codexParser(arm: ArmDescriptor, candidate: CandidateArtifact | n
             item.type === "command_execution" &&
             item.exit_code === 0 &&
             typeof item.command === "string" &&
-            readsSkillFile(item.command, candidate.name)
+            readsSkillFile(item.command, candidate.name, workspace)
           ) {
             state.exposure = { status: "observed", mechanism: "file-read", artifact_digest: candidate.artifact_digest, event_ref: `stdout:${line}` };
           }
@@ -157,6 +167,6 @@ export const codexAdapter: Adapter = {
       stdin: null,
     };
   },
-  parser: (arm, candidate) => codexParser(arm, candidate),
+  parser: (arm, candidate, workspace) => codexParser(arm, candidate, workspace),
   version_argv: (binary) => [binary, "--version"],
 };

@@ -73,6 +73,16 @@ describe("claude exposure negatives", () => {
     p.push(JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "x1", is_error: true }] } }));
     expect(p.state().exposure.status).toBe("unknown");
   });
+  it("counts a successful Read of the installed absolute path as file-read, upgraded by a later Skill call", () => {
+    const p = claudeParser(treatment, skill, "/w");
+    p.push(CLAUDE[0]!);
+    p.push(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "r1", name: "Read", input: { file_path: "/w/.claude/skills/acme-changelog/SKILL.md" } }] } }));
+    p.push(JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "r1" }] } }));
+    expect(p.state().exposure.mechanism).toBe("file-read");
+    p.push(skillCall);
+    p.push(JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "x1" }] } }));
+    expect(p.state().exposure.mechanism).toBe("native-invocation");
+  });
   it("ignores matches under forced-content and requires the installed Read path", () => {
     const p = claudeParser(forced, skill, "/w");
     p.push(CLAUDE[0]!);
@@ -112,7 +122,10 @@ describe("codex parser (hypothesis shapes)", () => {
   });
   it("counts only completed, successful read commands naming the exact path", () => {
     expect(readsSkillFile("cat .agents/skills/acme-changelog/SKILL.md", "acme-changelog")).toBe(true);
-    expect(readsSkillFile("bash -lc 'cat /w/.agents/skills/acme-changelog/SKILL.md'", "acme-changelog")).toBe(true);
+    expect(readsSkillFile("bash -lc 'cat /w/.agents/skills/acme-changelog/SKILL.md'", "acme-changelog", "/w")).toBe(true);
+    expect(readsSkillFile("cat /elsewhere/.agents/skills/acme-changelog/SKILL.md", "acme-changelog", "/w")).toBe(false);
+    expect(readsSkillFile("ls .agents/skills/acme-changelog/SKILL.md && cat README.md", "acme-changelog")).toBe(false);
+    expect(readsSkillFile("cat > .agents/skills/acme-changelog/SKILL.md", "acme-changelog")).toBe(false);
     expect(readsSkillFile("ls .agents/skills/acme-changelog/SKILL.md", "acme-changelog")).toBe(false);
     expect(readsSkillFile("cat .agents/skills/acme-changelog/SKILL.md.bak", "acme-changelog")).toBe(false);
     const p = codexParser(treatment, skill);

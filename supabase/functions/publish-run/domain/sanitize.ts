@@ -79,7 +79,8 @@ function armInput(arm: ArmDescriptor): UnsealedSpec["arms"][number] {
     bundle_files_digest: arm.bundle_files_digest,
     exposure_mode: arm.exposure_mode,
     prompt_overlay_digest: arm.prompt_overlay_digest,
-    config_differences: arm.config_differences.map(scrubText),
+    // Copied unchanged: arm digests (and the attempts' pinned arm_digest) must stay valid. Content-only requires [].
+    config_differences: [...arm.config_differences],
   };
 }
 

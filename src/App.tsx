@@ -1,10 +1,11 @@
-import { useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import type { RunRecords } from "../supabase/functions/publish-run/domain/contracts.ts";
 import { importLegacy, isLegacyPayload, type LegacyView } from "../supabase/functions/publish-run/domain/legacy.ts";
-import { buildEnvelope, importEnvelopeValue, type RunManifest } from "../supabase/functions/publish-run/domain/manifest.ts";
+import { buildEnvelope, importEnvelopeText, importEnvelopeValue, type RunManifest } from "../supabase/functions/publish-run/domain/manifest.ts";
 import { buildSampleRecords } from "../supabase/functions/publish-run/domain/sample.ts";
 import type { RunSummary } from "../supabase/functions/publish-run/domain/summary.ts";
 import { LIMITS, utf8Length } from "../supabase/functions/publish-run/domain/limits.ts";
+import { loadPublicSnapshot } from "./lib/api.ts";
 import { browserSha256 } from "./lib/hash.ts";
 import { getSupabase } from "./lib/supabase.ts";
 import { ExportPanel } from "./ui/export-panel.tsx";
@@ -17,6 +18,13 @@ export interface LoadedRun {
   records: RunRecords;
   manifest: RunManifest;
   summary: RunSummary;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function publicationIdFromHash(): string | null {
+  const match = /^#pub=([0-9a-f-]{36})$/i.exec(window.location.hash);
+  return match?.[1] && UUID.test(match[1]) ? match[1] : null;
 }
 
 const STAGE_TEXT: Record<string, string> = {
@@ -36,6 +44,50 @@ export function App() {
   const [paste, setPaste] = useState("");
   const [busy, setBusy] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const [snapshot, setSnapshot] = useState<{ id: string; records: RunRecords; manifest: RunManifest; summary: RunSummary } | null>(null);
+  const [snapshotNote, setSnapshotNote] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      const id = publicationIdFromHash();
+      setSnapshot(null);
+      if (!id) {
+        setSnapshotNote("");
+        return;
+      }
+      if (!client) {
+        setSnapshotNote("A snapshot link needs VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY before it can load.");
+        return;
+      }
+      setSnapshotNote("Loading snapshot.");
+      try {
+        const row = await loadPublicSnapshot(client, id);
+        if (!active) return;
+        if (!row) {
+          setSnapshotNote("That snapshot is not public, was revoked, or does not exist.");
+          return;
+        }
+        const verified = await importEnvelopeText(row.artifact, browserSha256);
+        if (!active) return;
+        if (!verified.ok || verified.value.manifest.content_digest !== row.contentDigest) {
+          setSnapshotNote("The snapshot bytes did not verify against their manifest; it is not shown.");
+          return;
+        }
+        setSnapshot({ id, records: verified.value.records, manifest: verified.value.manifest, summary: verified.value.summary });
+        setSnapshotNote(`Public snapshot ${id}, created ${row.createdAt}. Sanitized bytes verified and summary recomputed in this browser.`);
+      } catch (error) {
+        if (active) setSnapshotNote(error instanceof Error ? error.message : "Could not load that snapshot.");
+      }
+    };
+    void load();
+    const onHash = () => void load();
+    window.addEventListener("hashchange", onHash);
+    return () => {
+      active = false;
+      window.removeEventListener("hashchange", onHash);
+    };
+  }, [client]);
 
   function fail(heading: string, list: string[]) {
     setRun(null);
@@ -139,6 +191,13 @@ export function App() {
           or calls a model; runs come from the separate local runner.
         </p>
       </header>
+
+      {snapshotNote ? (
+        <p className="banner" role="status" aria-live="polite">
+          {snapshotNote}
+        </p>
+      ) : null}
+      {snapshot ? <RunReport summary={snapshot.summary} records={snapshot.records} manifest={snapshot.manifest} /> : null}
 
       <section aria-labelledby="load-title">
         <h2 id="load-title">Load records</h2>

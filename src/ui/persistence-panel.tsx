@@ -1,6 +1,7 @@
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import { useEffect, useState, type FormEvent } from "react";
 import type { LoadedRun } from "../App.tsx";
+import { deletePublication, listMyPublications, publishEdition, revokePublication, saveEdition, setVisibility, type MyPublication, type Publication, type SavedEdition } from "../lib/api.ts";
 
 /**
  * Optional Bolt Database persistence. Offline analysis and local runs never depend on it.
@@ -13,6 +14,18 @@ export function PersistencePanel({ client, run }: { client: SupabaseClient | nul
   const [recovering, setRecovering] = useState(false);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState<SavedEdition | null>(null);
+  const [isPublic, setIsPublic] = useState(false);
+  const [publication, setPublication] = useState<Publication | null>(null);
+  const [mine, setMine] = useState<MyPublication[]>([]);
+  // One idempotency key per (saved edition, visibility) request, so a retried click cannot duplicate it.
+  const [requestKey, setRequestKey] = useState<string>(() => crypto.randomUUID());
+
+  useEffect(() => {
+    setSaved(null);
+    setPublication(null);
+    setRequestKey(crypto.randomUUID());
+  }, [run]);
 
   useEffect(() => {
     if (!client) return;
@@ -93,7 +106,59 @@ export function PersistencePanel({ client, run }: { client: SupabaseClient | nul
   const onSignOut = () =>
     guarded(async () => {
       const { error } = await client.auth.signOut();
+      if (!error) {
+        setSaved(null);
+        setPublication(null);
+        setMine([]);
+      }
       return error ? error.message : "Signed out.";
+    });
+
+  const onSave = () =>
+    guarded(async () => {
+      if (!run) return "Load a run first.";
+      if (run.source === "sample") return "The synthetic sample is not saved. Import a runner bundle to save it.";
+      const next = await saveEdition(client, run.records, saved?.suiteId ?? null);
+      setSaved(next);
+      setPublication(null);
+      setRequestKey(crypto.randomUUID());
+      return next.existing ? `This exact edition was already saved (edition ${next.editionId}).` : `Saved immutable edition ${next.editionId}.`;
+    });
+
+  const onPublish = () =>
+    guarded(async () => {
+      if (!saved) return "Save the edition first. Publishing recomputes the summary from the saved bytes.";
+      const next = await publishEdition(client, saved, isPublic, requestKey);
+      setPublication(next);
+      return `${next.isPublic ? "Public" : "Private"} snapshot ${next.id} created from edition ${saved.editionId}; the server recomputed and sanitized it.`;
+    });
+
+  const onRefresh = () =>
+    guarded(async () => {
+      const list = await listMyPublications(client);
+      setMine(list);
+      return `${list.length} publication(s).`;
+    });
+
+  const onToggle = (id: string, next: boolean) =>
+    guarded(async () => {
+      await setVisibility(client, id, next);
+      setMine(await listMyPublications(client));
+      return next ? "Made public." : "Made private.";
+    });
+
+  const onRevoke = (id: string) =>
+    guarded(async () => {
+      await revokePublication(client, id);
+      setMine(await listMyPublications(client));
+      return "Revoked. The public link no longer loads.";
+    });
+
+  const onDelete = (id: string) =>
+    guarded(async () => {
+      await deletePublication(client, id);
+      setMine(await listMyPublications(client));
+      return "Deleted.";
     });
 
   return (
@@ -141,7 +206,68 @@ export function PersistencePanel({ client, run }: { client: SupabaseClient | nul
           </div>
         </form>
       )}
-      {session && run ? <p className="meta">Loaded run: {run.records.ledger.run_id}</p> : null}
+      {session ? (
+        <div>
+          <p className="meta">
+            {run ? `Loaded run: ${run.records.ledger.run_id}${run.source === "sample" ? " (synthetic sample; not saved)" : ""}` : "Load or import a run to save it."}
+          </p>
+          <div className="row">
+            <button type="button" onClick={onSave} disabled={busy || !run || run.source === "sample"}>
+              Save edition
+            </button>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={isPublic}
+                onChange={(e) => {
+                  setIsPublic(e.target.checked);
+                  setRequestKey(crypto.randomUUID());
+                }}
+              />
+              Public snapshot
+            </label>
+            <button type="button" className="secondary" onClick={onPublish} disabled={busy || !saved}>
+              Publish snapshot
+            </button>
+            <button type="button" className="secondary" onClick={onRefresh} disabled={busy}>
+              My publications
+            </button>
+          </div>
+          {publication ? (
+            <p>
+              {publication.isPublic ? (
+                <>
+                  Public link: <a href={`${redirectUrl()}#pub=${publication.id}`}>{`${redirectUrl()}#pub=${publication.id}`}</a>
+                </>
+              ) : (
+                `Private snapshot id: ${publication.id}`
+              )}
+            </p>
+          ) : null}
+          {mine.length > 0 ? (
+            <ul>
+              {mine.map((m) => (
+                <li key={m.publication_id}>
+                  {m.publication_id} · {m.revoked_at ? "revoked" : m.is_public ? "public" : "private"} · {m.created_at}{" "}
+                  {!m.revoked_at ? (
+                    <>
+                      <button type="button" className="secondary" disabled={busy} onClick={() => onToggle(m.publication_id, !m.is_public)}>
+                        {m.is_public ? "Make private" : "Make public"}
+                      </button>{" "}
+                      <button type="button" className="secondary" disabled={busy} onClick={() => onRevoke(m.publication_id)}>
+                        Revoke
+                      </button>{" "}
+                    </>
+                  ) : null}
+                  <button type="button" className="secondary" disabled={busy} onClick={() => onDelete(m.publication_id)}>
+                    Delete
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
       <p role="status" aria-live="polite">
         {message}
       </p>

@@ -63,9 +63,19 @@ export const FILE_LEDGER = "ledger.json";
 export const FILE_SUMMARY = "summary.json";
 export const attemptPath = (attemptId: string) => `attempts/${attemptId}.json`;
 
+/** Normalized edition input: spec (tasks sorted), ledger and canonically sorted attempts. */
+export function recordsEditionInput(records: RunRecords): { spec: RunRecords["spec"]; ledger: RunRecords["ledger"]; attempts: RunRecords["attempts"] } {
+  return { spec: { ...records.spec, tasks: sortTasks(records.spec.tasks) }, ledger: records.ledger, attempts: sortAttempts(records.attempts) };
+}
+
+/** Exact canonical text persisted as a suite edition; its SHA-256 is the records_edition_digest. */
+export function recordsEditionText(records: RunRecords): string {
+  return canonicalJson(recordsEditionInput(records));
+}
+
 /** Digest of normalized inputs and selection: spec, ledger and canonically sorted attempts. */
 export async function recordsEditionDigest(records: RunRecords, sha256: Sha256Port): Promise<Digest> {
-  return digestOf({ spec: { ...records.spec, tasks: sortTasks(records.spec.tasks) }, ledger: records.ledger, attempts: sortAttempts(records.attempts) }, sha256);
+  return digestOf(recordsEditionInput(records), sha256);
 }
 
 export async function manifestContentDigest(manifest: Omit<RunManifest, "content_digest"> | RunManifest, sha256: Sha256Port): Promise<Digest> {

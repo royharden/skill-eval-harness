@@ -84,9 +84,12 @@ usage stops new work (the cap cannot be enforced). Replay has no model spend; it
 ## Resume
 
 Resume requires identical experiment, arm and suite digests; anything changed needs a new run. The child pid is
-written synchronously at spawn and the dispatch marker before the workspace is materialized. Resume refuses while
-a recorded pid is alive, and refuses an interrupted attempt with no recorded pid until the operator names it with
-`--confirm-stopped`; the evidence (liveness check or operator confirmation) is written into the record. Cleanup
+written synchronously at spawn and the dispatch marker before the workspace is materialized. A dead leader pid is not
+proof of cleanup: on POSIX resume probes the whole process group (children are spawned detached, so the pid is the
+group id); on Windows, and whenever no pid was recorded or a live pid may have been reused, the operator must name
+the attempt with `--confirm-stopped`. The evidence (group probe or operator confirmation) is written into the record.
+Budget inputs (per-side estimate and caps) are pinned in `budget.json` at run start and must match on resume. A
+trusted grader process whose exit cannot be confirmed also marks the attempt `cleanup_pending` and stops scheduling. Cleanup
 established for a `cleanup_pending` attempt is recorded in `cleanup/<attempt_id>.json`, after which the run can
 finalize (the attempt itself stays an operational exclusion). Finalized attempts
 written after the last edition are adopted; dispatched-but-unfinalized attempts are recorded as `cancelled`

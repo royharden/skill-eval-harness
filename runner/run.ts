@@ -163,7 +163,16 @@ async function runAttempt(p: Prepared, store: RunStore, runId: string, side: Pla
     invocation.argv,
     { cwd: invocation.cwd, env: invocation.env, stdin: invocation.stdin },
     { first_event_timeout_ms: spec.limits.first_event_timeout_ms, total_timeout_ms: spec.limits.agent_timeout_ms, max_output_bytes: spec.limits.max_output_bytes },
-    { onSpawn: (pid) => store.recordInflightPid({ ...marker, pid }), onStdoutLine: (line) => parser.push(line) },
+    {
+      onSpawn: (pid) => {
+        try {
+          store.recordInflightPid({ ...marker, pid });
+        } catch (error) {
+          errors.push(`pid ${pid} could not be recorded (${error instanceof Error ? error.message : String(error)}); a resume after a crash will require --confirm-stopped`);
+        }
+      },
+      onStdoutLine: (line) => parser.push(line),
+    },
     cancel,
   );
   const parsed: ParsedState = parser.state();
@@ -176,6 +185,7 @@ async function runAttempt(p: Prepared, store: RunStore, runId: string, side: Pla
   let stopReason: string | null = null;
   let grade: AttemptRecord["grade"] = null;
   let graderTerminal: string | null = null;
+  let graderCleanupPending = false;
 
   if (host.cleanup === "cleanup_pending") {
     status = "cancelled";
@@ -207,7 +217,10 @@ async function runAttempt(p: Prepared, store: RunStore, runId: string, side: Pla
     reason = `harness reported an error result: ${parsed.terminal.reason}`;
   } else {
     if (!(await suiteUnchanged(p.suite))) throw new RunError(["the trusted suite changed during the run; refusing to grade (start a new run)"]);
-    const snapshot = await captureSnapshot(workspace, task.dir, task.graders, task.expected, Math.min(task.grader_timeout_ms ?? spec.limits.grader_timeout_ms, spec.limits.grader_timeout_ms));
+    const snapshot = await captureSnapshot(workspace, task.dir, task.graders, task.expected, Math.min(task.grader_timeout_ms ?? spec.limits.grader_timeout_ms, spec.limits.grader_timeout_ms), (pid) => {
+      graderCleanupPending = true;
+      errors.push(`grader process cleanup unconfirmed (pid ${pid ?? "unknown"}); confirm it is gone before resuming`);
+    });
     await store.writePrivate("snapshots", attemptId, canonicalJson(snapshot));
     const outcome = evaluateGraders(task.graders, snapshot);
     graderTerminal = now();
@@ -215,6 +228,7 @@ async function runAttempt(p: Prepared, store: RunStore, runId: string, side: Pla
     reason = outcome.status === "grader_error" ? `grader error: ${outcome.errors.join("; ").slice(0, 900)}` : `agent completed; graders ${outcome.status === "pass" ? "passed" : "failed"}`;
     grade = { checks: outcome.checks, score: outcome.score, snapshot_digest: await digestOf(snapshot, nodeSha256) };
     if (outcome.status === "grader_error") errors.push(...outcome.errors.slice(0, 8));
+    if (graderCleanupPending) stopReason = "cleanup pending: a trusted grader process could not be confirmed stopped";
   }
   if (parsed.malformed_lines > 0) errors.push(`${parsed.malformed_lines} malformed event line(s) kept in the private trace`);
   if (parsed.unknown_events > 0) errors.push(`${parsed.unknown_events} unknown optional event(s) kept in the private trace`);
@@ -262,7 +276,7 @@ async function runAttempt(p: Prepared, store: RunStore, runId: string, side: Pla
     cost: parsed.cost,
     turns: parsed.turns,
     duration_ms: host.duration_ms,
-    cleanup: host.cleanup,
+    cleanup: graderCleanupPending ? "cleanup_pending" : host.cleanup,
     retry_qualified: status === "agent_error" && retryQualified,
     errors: errors.map((e) => e.slice(0, 2000)).slice(0, 32),
     attestation: spec.harness_id === "replay" ? "replay-synthetic" : "runner",
@@ -290,6 +304,8 @@ function spent(attempts: AttemptRecord[], estimate: number | null): Spent {
   let unknownUsd = 0;
   let unknownTokens = 0;
   for (const a of attempts) {
+    // Affirmative no-start evidence (process never started): nothing was spent.
+    if (a.lifecycle.agent_started_at === null && (a.retry_qualified || a.status === "cancelled")) continue;
     if (a.cost.usd === null) {
       unknownUsd += 1;
       usd += estimate ?? 0;
@@ -315,6 +331,12 @@ function capStop(spec: ExperimentSpec, file: ExperimentFile, used: Spent, sidesA
     }
   }
   return null;
+}
+
+/** Budget inputs pinned in budget.json at run start (the estimate is not part of the experiment digest). */
+function budgetPin(p: Prepared): Record<string, unknown> {
+  const l = p.resolved.spec.limits;
+  return { estimate_usd_per_side: p.file.estimate_usd_per_side, max_usd: l.max_usd, max_tokens: l.max_tokens, max_attempts: l.max_attempts, enforcement: l.enforcement };
 }
 
 function nextEdition(prev: LedgerEdition, prevDigest: string, kind: LedgerEdition["kind"], sides: PlanSide[], note: string): LedgerEdition {
@@ -357,11 +379,16 @@ export async function executeRun(opts: RunOptions): Promise<RunOutcome | { dryRu
   let stopReason: string | null = null;
   try {
     if (opts.resume) {
+      const pinned = await store.readBudget();
+      if (pinned !== null && canonicalJson(pinned) !== canonicalJson(budgetPin(p))) {
+        throw new RunError(["budget inputs (estimate_usd_per_side or caps) differ from those pinned at run start; changed configuration requires a new run"]);
+      }
       const recovered = await recover(store, p, runId, opts.confirmStopped ?? []);
       ledger = recovered.ledger;
       ledgerDigest = recovered.digest;
     } else {
       await store.writeSpec(spec);
+      await store.writeBudget(budgetPin(p));
       ledger = initialLedger(spec, runId, now());
       ledgerDigest = await store.writeLedger(ledger);
     }
@@ -418,6 +445,19 @@ export async function executeRun(opts: RunOptions): Promise<RunOutcome | { dryRu
   }
 }
 
+/** POSIX: true if no process remains in group `pgid`, false if some do; null where groups cannot be probed (Windows). */
+function processGroupGone(pgid: number): boolean | null {
+  if (process.platform === "win32") return null;
+  try {
+    process.kill(-pgid, 0);
+    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return true;
+    return code === "EPERM" ? false : null;
+  }
+}
+
 function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -451,21 +491,33 @@ async function recover(store: RunStore, p: Prepared, runId: string, confirmStopp
   const confirmed = new Set(confirmStopped);
   // Establish cleanup first: a live (or unidentifiable) owned process blocks resume.
   const evidence = new Map<string, string>();
+  // A dead leader pid is not proof: a descendant can outlive it (that is exactly how cleanup_pending arises).
+  // POSIX children are spawned detached, so the pid is also the process-group id and the whole group can be probed.
+  // Windows has no equivalent probe here, so the operator must confirm.
   const check = (attemptId: string, pid: number | null, what: string) => {
-    if (pid !== null) {
-      if (pidAlive(pid)) throw new RunError([`${what} ${attemptId}: process ${pid} may still be running; stop it (and its children) before resuming`]);
-      evidence.set(attemptId, `owned process ${pid} not running at resume (liveness check; descendants not verifiable)`);
-    } else if (confirmed.has(attemptId)) {
-      evidence.set(attemptId, "no pid was recorded; the operator confirmed no process is running (--confirm-stopped)");
-    } else {
-      throw new RunError([`${what} ${attemptId}: no process id was recorded, so its process cannot be checked. Confirm nothing is running for it, then resume with --confirm-stopped ${attemptId}`]);
+    const confirmHint = `confirm nothing for it is still running (including child processes), then resume with --confirm-stopped ${attemptId}`;
+    if (confirmed.has(attemptId)) {
+      evidence.set(
+        attemptId,
+        pid !== null && pidAlive(pid)
+          ? `pid ${pid} was alive at resume; the operator confirmed it is not the owned process tree (--confirm-stopped)`
+          : "the operator confirmed no process for this attempt is running (--confirm-stopped)",
+      );
+      return;
     }
+    if (pid === null) throw new RunError([`${what} ${attemptId}: no process id was recorded, so it cannot be checked; ${confirmHint}`]);
+    if (pidAlive(pid)) throw new RunError([`${what} ${attemptId}: process ${pid} may still be running; stop it and its children, or if the pid was reused by an unrelated process, ${confirmHint}`]);
+    const group = processGroupGone(pid);
+    if (group === true) evidence.set(attemptId, `process group ${pid} has no members at resume (POSIX group probe)`);
+    else if (group === false) throw new RunError([`${what} ${attemptId}: process group ${pid} still has members; stop them before resuming`]);
+    else throw new RunError([`${what} ${attemptId}: the leader ${pid} exited, but descendants cannot be verified on this OS; ${confirmHint}`]);
   };
   for (const m of inflight) if (!known.has(m.attempt_id)) check(m.attempt_id, m.pid, "interrupted attempt");
   for (const a of attempts) {
     if (a.cleanup !== "cleanup_pending" || store.cleanupEstablished(a.attempt_id)) continue;
     const m = inflight.find((x) => x.attempt_id === a.attempt_id);
-    check(a.attempt_id, m?.pid ?? null, "cleanup-pending attempt");
+    const graderLeftover = a.errors.some((e) => e.startsWith("grader process cleanup unconfirmed"));
+    check(a.attempt_id, graderLeftover ? null : (m?.pid ?? null), graderLeftover ? "cleanup-pending grader for attempt" : "cleanup-pending attempt");
   }
 
   const sides = latest.ledger.sides.map((s) => ({ ...s, attempt_ids: [...s.attempt_ids] }));
@@ -539,7 +591,7 @@ function interruptedRecord(spec: ExperimentSpec, p: Prepared, runId: string, sid
     cost: { usd: null, source: "unknown", pricing_snapshot: null },
     turns: null,
     duration_ms: null,
-    cleanup: "not_needed",
+    cleanup: "confirmed",
     retry_qualified: false,
     errors: [cleanupEvidence],
     attestation: spec.harness_id === "replay" ? "replay-synthetic" : "runner",

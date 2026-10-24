@@ -61,6 +61,7 @@ export async function captureSnapshot(
   graders: GraderDef[],
   expected: Record<string, string>,
   graderTimeoutMs: number,
+  onCleanupPending?: (pid: number | null) => void,
 ): Promise<WorkspaceSnapshot> {
   const files: Record<string, CapturedFile> = {};
   const commands: Record<string, CapturedCommand> = {};
@@ -77,6 +78,7 @@ export async function captureSnapshot(
       {},
       makeCancelToken(),
     );
+    if (result.cleanup === "cleanup_pending") onCleanupPending?.(result.pid);
     commands[g.id] = {
       exit_code: result.exit_code,
       stdout: result.stdout,

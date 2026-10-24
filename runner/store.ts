@@ -5,7 +5,7 @@
 //   workspaces/<attempt_id>/, homes/<attempt_id>/, records.jsonl (regenerated index), manifest.private.json,
 //   bundle.private.json, LOCK.
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { canonicalJson, digestOf, sortAttempts } from "../supabase/functions/publish-run/domain/canonical.ts";
@@ -60,6 +60,15 @@ export class RunStore {
     return parsed.value;
   }
 
+  async writeBudget(pin: Record<string, unknown>): Promise<void> {
+    await writeImmutable(this.path("budget.json"), canonicalJson(pin));
+  }
+
+  async readBudget(): Promise<Record<string, unknown> | null> {
+    if (!existsSync(this.path("budget.json"))) return null;
+    return JSON.parse(await readFile(this.path("budget.json"), "utf8")) as Record<string, unknown>;
+  }
+
   async writeLedger(ledger: LedgerEdition): Promise<Digest> {
     await writeImmutable(this.path("ledger", `edition-${String(ledger.edition).padStart(4, "0")}.json`), canonicalJson(ledger));
     return digestOf(ledger, nodeSha256);
@@ -103,7 +112,11 @@ export class RunStore {
   /** Synchronous so the pid is on disk before the runner reads any child output or can crash. */
   recordInflightPid(marker: InflightMarker): void {
     mkdirSync(this.path("inflight"), { recursive: true });
-    writeFileSync(this.path("inflight", `${marker.attempt_id}.pid.json`), canonicalJson(marker), { encoding: "utf8", flag: "wx" });
+    const target = this.path("inflight", `${marker.attempt_id}.pid.json`);
+    if (existsSync(target)) throw new FsBoundError(`${target} already exists`);
+    const tmp = `${target}.tmp-${process.pid}`;
+    writeFileSync(tmp, canonicalJson(marker), { encoding: "utf8", flag: "wx" });
+    renameSync(tmp, target);
   }
 
   /** Immutable record that cleanup for a cleanup_pending attempt was established at a recovery edition. */
@@ -121,7 +134,15 @@ export class RunStore {
     const byId = new Map<string, InflightMarker>();
     for (const name of (await readdir(dir)).sort()) {
       if (!name.endsWith(".json")) continue;
-      const m = JSON.parse(await readFile(join(dir, name), "utf8")) as InflightMarker;
+      let m: InflightMarker | null = null;
+      try {
+        const v = JSON.parse(await readFile(join(dir, name), "utf8")) as InflightMarker;
+        if (v && typeof v.attempt_id === "string" && (v.pid === null || (Number.isInteger(v.pid) && v.pid > 0))) m = v;
+      } catch {
+        m = null;
+      }
+      // An unreadable pid file means "pid unknown": resume then requires operator confirmation.
+      if (!m) continue;
       const prior = byId.get(m.attempt_id);
       if (!prior || (m.pid !== null && prior.pid === null)) byId.set(m.attempt_id, m);
     }

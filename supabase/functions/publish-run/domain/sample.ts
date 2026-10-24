@@ -22,10 +22,11 @@ import { DEFAULT_LIMITS } from "./limits.ts";
 export const SAMPLE_LABEL = "Synthetic sample — fabricated records for demonstrating the report. Not measured agent behavior.";
 export const SAMPLE_RUN_ID = "sample-run-20261023";
 
-type Cell = AttemptStatus | "missing";
+export type SyntheticCell = AttemptStatus | "missing";
+export type SyntheticPlan = Record<string, { label: string; cells: Array<[SyntheticCell, SyntheticCell]>; cost: CostSource }>;
 
 /** Outcomes per task: [repeat0, repeat1, repeat2] x [baseline, treatment]. */
-const PLAN: Record<string, { label: string; cells: Array<[Cell, Cell]>; cost: CostSource }> = {
+export const SAMPLE_PLAN: SyntheticPlan = {
   "changelog-date-format": { label: "Use ISO dates in release headings", cells: [["fail", "pass"], ["fail", "fail"], ["fail", "pass"]], cost: "reported" },
   "changelog-heading": { label: "Add a release heading in house style", cells: [["fail", "pass"], ["fail", "pass"], ["pass", "pass"]], cost: "reported" },
   "changelog-link-refs": { label: "Keep compare links at the bottom", cells: [["pass", "pass"], ["pass", "fail"], ["pass", "pass"]], cost: "reported" },
@@ -41,8 +42,18 @@ function at(minutes: number): string {
 }
 
 export async function buildSampleRecords(sha256: Sha256Port): Promise<RunRecords> {
+  return buildSyntheticRecords(SAMPLE_PLAN, sha256);
+}
+
+/**
+ * Builds valid synthetic v2 records from a per-task outcome plan. Every task must list the same number of repeats.
+ * "missing" marks a not_started side. Used by the sample and by analytic test fixtures.
+ */
+export async function buildSyntheticRecords(PLAN: SyntheticPlan, sha256: Sha256Port, schedulingSeed = 20261023): Promise<RunRecords> {
   const d = (label: string) => sha256(utf8(`synthetic-sample:${label}`));
   const taskIds = Object.keys(PLAN).sort();
+  const repeats = PLAN[taskIds[0]!]?.cells.length ?? 0;
+  if (taskIds.some((id) => PLAN[id]!.cells.length !== repeats)) throw new Error("synthetic plan tasks must have equal repeat counts");
   const tasks: TaskDescriptor[] = [];
   for (const id of taskIds) {
     tasks.push({
@@ -70,10 +81,10 @@ export async function buildSampleRecords(sha256: Sha256Port): Promise<RunRecords
     base_tool_permission_config: { digest: await d("tools"), summary: "synthetic: no tools executed" },
     environment_allowlist_names: [],
     ambient_context_digest: await d("ambient"),
-    repeats: 3,
-    scheduling_seed: 20261023,
+    repeats,
+    scheduling_seed: schedulingSeed,
     retry_policy: { startup_retries: 0, selection: RETRY_SELECTION_POLICY },
-    limits: { ...DEFAULT_LIMITS, max_attempts: 36, max_usd: null, max_tokens: null, run_deadline: null, enforcement: "stop-new-work" },
+    limits: { ...DEFAULT_LIMITS, max_attempts: Math.max(1, taskIds.length * repeats * 2), max_usd: null, max_tokens: null, run_deadline: null, enforcement: "stop-new-work" },
     intervention: "content-only",
     arms: [
       { arm_id: "baseline", artifact_kind: "none", artifact_digest: "none", bundle_files_digest: "none", exposure_mode: "none", prompt_overlay_digest: "none", config_differences: [] },

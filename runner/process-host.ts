@@ -128,10 +128,16 @@ export async function killTree(child: ChildProcess, confirmMs: number, isSettled
     // Once the leader has exited its pid may already belong to an unrelated process: never taskkill it by pid.
     // The tree cannot be confirmed from here, so report unconfirmed (caller records cleanup_pending).
     if (leaderExited(child)) return false;
+    // Bounded: a taskkill that never returns must not leave the attempt unsettled.
     await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, confirmMs);
+      const done = () => {
+        clearTimeout(timer);
+        resolve();
+      };
       const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { shell: false, windowsHide: true, stdio: "ignore" });
-      killer.once("error", () => resolve());
-      killer.once("exit", () => resolve());
+      killer.once("error", done);
+      killer.once("exit", done);
     });
   } else {
     try {
@@ -219,6 +225,8 @@ export async function runHosted(
     const timers: Array<ReturnType<typeof setTimeout>> = [];
     let spawnError: string | null = null;
 
+    let closed = false;
+    let exitPathActive = false;
     let unsubscribe: () => void = () => undefined;
     let watchdog: ReturnType<typeof setInterval> | null = null;
     const settle = (result: HostResult) => {
@@ -236,8 +244,9 @@ export async function runHosted(
     };
 
     const stop = (why: HostTermination) => {
-      // Never signal after this attempt settled: its pid may be reused by an unrelated process.
-      if (killing || settled) return;
+      // Never signal after this attempt settled (its pid may be reused), nor once the leader has exited and
+      // settlement is under way through the close or leader-exit path (that path reaps the group itself).
+      if (killing || settled || closed || exitPathActive) return;
       termination = why;
       killing = killTree(child, confirmMs, () => settled);
     };
@@ -301,7 +310,6 @@ export async function runHosted(
     child.once("error", (error) => {
       spawnError = error.message;
     });
-    let closed = false;
     let exitPathReaped = false;
     child.once("close", (code, signal) => {
       if (settled || closed) return;
@@ -328,6 +336,8 @@ export async function runHosted(
       const grace = Math.min(2000, confirmMs);
       setTimeout(() => {
         if (settled || closed || killing) return;
+        exitPathActive = true;
+        for (const t of timers) clearTimeout(t);
         const finishExit = async () => {
           if (process.platform !== "win32" && child.pid !== undefined) {
             const group = await reapGroup(child.pid, confirmMs, () => settled);

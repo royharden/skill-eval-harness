@@ -74,7 +74,11 @@ the process is gone. On POSIX, "confirmed" means the leader exited and the whole
 and polled empty (also checked after a normal exit); a descendant that called setsid()/setpgid() left the group and
 is invisible to this probe. On Windows only the leader's exit is confirmed (`taskkill /T /F` is best effort for the
 tree, and nothing checks for grandchildren after a normal exit). No OS/version combination has been validated yet.
-Trusted grader children have their pids recorded at spawn and are checked on resume like the agent.
+Trusted grader children have their pids recorded at spawn and are checked on resume like the agent. If the leader exits but the output pipes
+stay open, something is still alive: the group is reaped (best effort) and, unless the pipes then close, the attempt
+is recorded `cleanup_pending`. A descendant that escaped the group and also closed its stdio cannot be detected
+(unverified). On Windows, Ctrl+C in a shared console also reaches the child; the leader has usually exited before
+the tree can be confirmed, so most Windows cancels are recorded `cleanup_pending` and need `--confirm-stopped` on resume.
 
 Status mapping: valid grader success → `pass`; valid failed check → `fail`; agent deadline after the first event →
 `timeout` (a binary failure under the pinned policy); startup, first-event, auth, output-cap, missing terminal event

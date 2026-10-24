@@ -102,8 +102,9 @@ function groupState(pgid: number): "empty" | "members" | "unknown" {
  * POSIX: SIGKILL the whole group and poll until it is empty. The leader exiting is not tree exit.
  * Returns "empty" if nothing was left, "reaped" if members were killed and confirmed gone, "stuck" otherwise.
  */
-export async function reapGroup(pgid: number, confirmMs: number): Promise<"empty" | "reaped" | "stuck"> {
+export async function reapGroup(pgid: number, confirmMs: number, isSettled: () => boolean = () => false): Promise<"empty" | "reaped" | "stuck"> {
   if (groupState(pgid) === "empty") return "empty";
+  if (isSettled()) return "stuck";
   try {
     process.kill(-pgid, "SIGKILL");
   } catch {
@@ -120,7 +121,7 @@ export async function reapGroup(pgid: number, confirmMs: number): Promise<"empty
 }
 
 /** Terminates the whole owned process tree and reports whether exit was confirmed. */
-export async function killTree(child: ChildProcess, confirmMs: number): Promise<boolean> {
+export async function killTree(child: ChildProcess, confirmMs: number, isSettled: () => boolean = () => false): Promise<boolean> {
   const pid = child.pid;
   if (pid === undefined) return true;
   if (process.platform === "win32") {
@@ -140,7 +141,7 @@ export async function killTree(child: ChildProcess, confirmMs: number): Promise<
     }
     await waitExit(child, Math.min(2000, confirmMs));
     // Confirm the whole group, not only the leader: SIGKILL survivors and poll until the group is empty.
-    const group = await reapGroup(pid, confirmMs);
+    const group = await reapGroup(pid, confirmMs, isSettled);
     return (await waitExit(child, confirmMs)) && group !== "stuck";
   }
   // Windows: taskkill /T is best effort for the tree; only the leader's exit can be confirmed here (not validated).
@@ -238,7 +239,7 @@ export async function runHosted(
       // Never signal after this attempt settled: its pid may be reused by an unrelated process.
       if (killing || settled) return;
       termination = why;
-      killing = killTree(child, confirmMs);
+      killing = killTree(child, confirmMs, () => settled);
     };
 
     const outDecoder = new StringDecoder("utf8");
@@ -301,6 +302,7 @@ export async function runHosted(
       spawnError = error.message;
     });
     let closed = false;
+    let exitPathReaped = false;
     child.once("close", (code, signal) => {
       if (settled || closed) return;
       closed = true;
@@ -310,32 +312,35 @@ export async function runHosted(
         if (killing) cleanup = (await killing) ? "confirmed" : "cleanup_pending";
         else if (process.platform !== "win32" && child.pid !== undefined) {
           // POSIX: after a normal exit, a detached descendant could outlive the leader; reap and confirm the group.
-          const group = await reapGroup(child.pid, confirmMs);
-          cleanup = group === "empty" ? "not_needed" : group === "reaped" ? "confirmed" : "cleanup_pending";
+          const group = await reapGroup(child.pid, confirmMs, () => settled);
+          cleanup = group === "stuck" ? "cleanup_pending" : group === "reaped" || exitPathReaped ? "confirmed" : "not_needed";
         }
         if (spawnError && child.pid === undefined) termination = "spawn_error";
         settle(finish({ exit_code: code, signal: signal ?? null, cleanup, spawn_error: spawnError, pid: child.pid ?? null }));
       };
       void done();
     });
-    // Leader exited but "close" does not follow (a descendant holds the pipes): settle promptly instead of waiting
-    // for the deadline. POSIX reaps and confirms the group; Windows cannot confirm the tree.
+    // Leader exited but "close" does not follow: only a descendant can still hold the pipes, so something is alive.
+    // Best effort: reap the POSIX group (escaped descendants are invisible to it), then give "close" one more short
+    // window. If close arrives, the close handler settles (confirmed when the reap killed members). Otherwise the
+    // holder is still alive: release our pipe ends and settle cleanup_pending, never "confirmed".
     child.once("exit", (code, signal) => {
+      const grace = Math.min(2000, confirmMs);
       setTimeout(() => {
         if (settled || closed || killing) return;
         const finishExit = async () => {
-          let cleanup: HostResult["cleanup"] = "cleanup_pending";
           if (process.platform !== "win32" && child.pid !== undefined) {
-            const group = await reapGroup(child.pid, confirmMs);
-            cleanup = group === "stuck" ? "cleanup_pending" : "confirmed";
+            const group = await reapGroup(child.pid, confirmMs, () => settled);
+            if (group === "reaped") exitPathReaped = true;
           }
-          if (settled || closed) return;
-          for (const t of timers) clearTimeout(t);
+          await new Promise((r) => setTimeout(r, grace));
+          // A cancel/deadline that started meanwhile owns settlement through the kill/watchdog path.
+          if (settled || closed || killing) return;
           releasePipes();
-          settle(finish({ exit_code: code, signal: signal ?? null, cleanup, spawn_error: spawnError, pid: child.pid ?? null }));
+          settle(finish({ exit_code: code, signal: signal ?? null, cleanup: "cleanup_pending", spawn_error: spawnError, pid: child.pid ?? null }));
         };
         void finishExit();
-      }, Math.min(2000, confirmMs));
+      }, grace);
     });
     // After a kill, "close" may never fire (unconfirmed exit, or a surviving descendant still holds the pipes).
     // Settle with cleanup_pending after one more confirmation window so scheduling stops instead of hanging.

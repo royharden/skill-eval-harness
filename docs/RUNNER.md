@@ -10,7 +10,7 @@ validate <suite-dir>                                 no spend; oracle-applied fi
 preflight <experiment.yaml>                          resolves binary, CLI version (--version probe only), pins, capabilities
 run <experiment.yaml> --dry-run                      resolved hashes, limits, capabilities, schedule; starts no CLI/model
 run <experiment.yaml> --out <dir> [--run-id <id>]    serial dispatch
-run <experiment.yaml> --resume --run-id <id> --out <dir>
+run <experiment.yaml> --resume --run-id <id> --out <dir> [--confirm-stopped <attempt_id,...>]
 report <run-dir>                                     recompute the summary from the run's records
 export <run-dir> [--keep-labels] [--keep-check-details] [--out <dir>]
                                                      sanitized staging bundle under <out>/<run_id>/ (not publication)
@@ -77,12 +77,18 @@ unresolved cleanup → `cancelled`. Final assistant text alone is never completi
 
 Caps stop new work; they are not provider-enforced. A fresh block is admitted on the estimate for both sides and
 every side is rechecked before dispatch, so an exhausted cap can leave the partner side `not_started` (visible as an
-unmatched side, never padded). With `max_usd` set and no pinned estimate, paid dispatch is refused. Replay has no
-model spend. In-flight usage can overshoot; reports show cap, known cost and coverage.
+unmatched side, never padded). With `max_usd` set and no pinned estimate, paid dispatch is refused; executed attempts
+with unknown cost are charged the pinned per-side estimate. With `max_tokens` set, any executed attempt with unknown
+usage stops new work (the cap cannot be enforced). Replay has no model spend; its scripted cost is labelled estimated. In-flight usage can overshoot; reports show cap, known cost and coverage.
 
 ## Resume
 
-Resume requires identical experiment, arm and suite digests; anything changed needs a new run. Finalized attempts
+Resume requires identical experiment, arm and suite digests; anything changed needs a new run. The child pid is
+written synchronously at spawn and the dispatch marker before the workspace is materialized. Resume refuses while
+a recorded pid is alive, and refuses an interrupted attempt with no recorded pid until the operator names it with
+`--confirm-stopped`; the evidence (liveness check or operator confirmation) is written into the record. Cleanup
+established for a `cleanup_pending` attempt is recorded in `cleanup/<attempt_id>.json`, after which the run can
+finalize (the attempt itself stays an operational exclusion). Finalized attempts
 written after the last edition are adopted; dispatched-but-unfinalized attempts are recorded as `cancelled`
 (action history unknown, never retried automatically); a recovery edition references its predecessor. Measured
 outcomes are never overwritten.

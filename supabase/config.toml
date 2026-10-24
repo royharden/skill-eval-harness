@@ -1,0 +1,5 @@
+# Function gateway settings only. This is not a local Supabase stack.
+# Do not start Docker or a local database from this file.
+
+[functions.publish-run]
+verify_jwt = true

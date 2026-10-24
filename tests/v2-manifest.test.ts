@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildEnvelope, envelopeText, importEnvelopeText, type Envelope } from "../supabase/functions/publish-run/domain/manifest.ts";
-import { buildSampleRecords } from "../supabase/functions/publish-run/domain/sample.ts";
+import { buildSampleRecords, buildSyntheticRecords, type SyntheticPlan } from "../supabase/functions/publish-run/domain/sample.ts";
 import { sanitizeForExport, scrubText } from "../supabase/functions/publish-run/domain/sanitize.ts";
 import { sha256 } from "./helpers/sha.ts";
 
@@ -45,6 +45,31 @@ describe("envelope", () => {
   });
 });
 
+describe("large files", () => {
+  it("accepts a valid file larger than 64 KiB (per-file cap is 512 KiB)", async () => {
+    const plan: SyntheticPlan = {};
+    for (let i = 0; i < 60; i += 1) plan[`task-${String(i).padStart(3, "0")}`] = { label: `T${i}`, cost: "reported", cells: [["fail", "pass"], ["pass", "pass"], ["fail", "fail"]] };
+    const records = await buildSyntheticRecords(plan, sha256);
+    const built = await buildEnvelope(records, sha256, { kind: "private" });
+    if (!built.ok) throw new Error(built.errors.join("; "));
+    expect(built.value.envelope.files["ledger.json"]!.length).toBeGreaterThan(64 * 1024);
+    const result = await importEnvelopeText(envelopeText(built.value.envelope), sha256);
+    expect(result.ok).toBe(true);
+  });
+  it("refuses a summary.json that disagrees with the recomputed summary", async () => {
+    const env = await privateEnvelope();
+    expect(env.files["summary.json"]).toBeDefined();
+    const tampered = JSON.parse(env.files["summary.json"]!) as Record<string, unknown>;
+    tampered.notes = ["fabricated"];
+    const text = JSON.stringify(tampered);
+    const files = { ...env.files, "summary.json": text };
+    const manifest = { ...env.manifest, files: { ...env.manifest.files, "summary.json": await sha256(new TextEncoder().encode(text)) } };
+    const { manifestContentDigest } = await import("../supabase/functions/publish-run/domain/manifest.ts");
+    const sealed = { ...manifest, content_digest: await manifestContentDigest(manifest, sha256) };
+    expect((await importEnvelopeText(JSON.stringify({ manifest: sealed, files }), sha256)).ok).toBe(false);
+  });
+});
+
 describe("sanitized export", () => {
   it("withholds labels, paths, traces and event refs and records the transform", async () => {
     const records = await buildSampleRecords(sha256);
@@ -56,7 +81,8 @@ describe("sanitized export", () => {
     expect(out.envelope.manifest.transform?.source_manifest_digest).toBe(env.manifest.content_digest);
     expect(out.records.spec.tasks.every((t) => /^Task \d+$/.test(t.display_label) && t.suite_path === "withheld")).toBe(true);
     expect(out.records.attempts.every((a) => a.exposure.event_ref === null && a.trace.digest === null)).toBe(true);
-    expect(out.envelope.manifest.runtime.os).toBe("<path>");
+    expect(out.envelope.manifest.runtime).toEqual({});
+    expect(out.records.attempts.every((a) => a.errors.length === 0 && a.terminal_reason.startsWith("status "))).toBe(true);
     expect(out.records.spec.experiment_digest).not.toBe(records.spec.experiment_digest);
     const reimported = await importEnvelopeText(envelopeText(out.envelope), sha256);
     expect(reimported.ok).toBe(true);
@@ -68,7 +94,8 @@ describe("sanitized export", () => {
     });
   });
   it("scrubs paths, emails and secret-like tokens", () => {
-    expect(scrubText("see C:\\Users\\roy\\x.txt and /home/roy/y")).toBe("see <path> and <path>");
+    expect(scrubText("see C:\\Users\\roy\\x.txt")).toBe("see <path>");
+    expect(scrubText('"C:\\Program Files\\x" and /home/roy/y')).toBe('"<path>" and <path>');
     expect(scrubText("mail a@b.co")).toBe("mail <email>");
     expect(scrubText("ANTHROPIC_API_KEY=abc")).toBe("<env-assignment>");
   });

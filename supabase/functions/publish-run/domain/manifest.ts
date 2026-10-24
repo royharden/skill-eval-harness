@@ -90,6 +90,8 @@ export interface BuildOptions {
   sourceRefs?: SourceRef[];
   transform?: Transform | null;
   derivation?: string;
+  /** Only for re-deriving an imported manifest; new manifests always carry the current TOOL_VERSION. */
+  toolVersion?: string;
 }
 
 /** Serializes records + recomputed summary into distributable files and seals a manifest over their exact bytes. */
@@ -112,7 +114,7 @@ export async function buildEnvelope(records: RunRecords, sha256: Sha256Port, opt
   const unsealed: Omit<RunManifest, "content_digest"> = {
     schema_version: SCHEMA_VERSION,
     manifest_kind: options.kind,
-    tool_version: TOOL_VERSION,
+    tool_version: options.toolVersion ?? TOOL_VERSION,
     method_version: METHOD_VERSION,
     run_id: ledger.run_id,
     experiment_id: spec.experiment_id,
@@ -183,7 +185,10 @@ export interface VerifiedImport {
  * manifest.files BEFORE parsing records, then record validation, digest checks and summary recomputation.
  * A matching hash proves integrity against the supplied manifest, not agent execution or honesty.
  */
-export async function importEnvelopeText(text: string, sha256: Sha256Port): Promise<Result<VerifiedImport> & { stage?: "size" | "json" | "schema" | "integrity" | "records" }> {
+export type ImportStage = "size" | "json" | "schema" | "integrity" | "file-json" | "records";
+export type ImportResult = Result<VerifiedImport> & { stage?: ImportStage };
+
+export async function importEnvelopeText(text: string, sha256: Sha256Port): Promise<ImportResult> {
   if (utf8Length(text) > LIMITS.envelopeBytes) return { ok: false, stage: "size", errors: [`envelope exceeds ${LIMITS.envelopeBytes} bytes`] };
   let parsed: unknown;
   try {
@@ -194,11 +199,14 @@ export async function importEnvelopeText(text: string, sha256: Sha256Port): Prom
   return importEnvelopeValue(parsed, sha256);
 }
 
-export async function importEnvelopeValue(parsed: unknown, sha256: Sha256Port): Promise<Result<VerifiedImport> & { stage?: "size" | "json" | "schema" | "integrity" | "records" }> {
-  const bounds = shapeBoundsErrors(parsed);
-  if (bounds.length) return { ok: false, stage: "schema", errors: bounds };
+const own = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
+
+export async function importEnvelopeValue(parsed: unknown, sha256: Sha256Port): Promise<ImportResult> {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { ok: false, stage: "schema", errors: ["envelope must be an object with manifest and files"] };
   const env = parsed as { manifest?: unknown; files?: unknown };
+  // Shape bounds apply to the manifest; file bodies are bounded by bytes here and by shape after parsing below.
+  const bounds = shapeBoundsErrors(env.manifest);
+  if (bounds.length) return { ok: false, stage: "schema", errors: bounds.map((b) => `manifest: ${b}`) };
   const shape = manifestShapeErrors(env.manifest);
   if (!env.files || typeof env.files !== "object" || Array.isArray(env.files)) shape.push("files must be an object of relative path -> text");
   if (shape.length) return { ok: false, stage: "schema", errors: shape };
@@ -207,7 +215,7 @@ export async function importEnvelopeValue(parsed: unknown, sha256: Sha256Port): 
 
   const errors: string[] = [];
   const paths = Object.keys(files);
-  if (paths.length > LIMITS.files) return { ok: false, stage: "integrity", errors: [`at most ${LIMITS.files} files`] };
+  if (paths.length > LIMITS.files || Object.keys(manifest.files).length > LIMITS.files) return { ok: false, stage: "integrity", errors: [`at most ${LIMITS.files} files`] };
   const aliases = new Map<string, string>();
   for (const path of [...paths, ...Object.keys(manifest.files)]) {
     const err = relativePathError(path);
@@ -221,36 +229,43 @@ export async function importEnvelopeValue(parsed: unknown, sha256: Sha256Port): 
     const body = files[path];
     if (typeof body !== "string") errors.push(`${path}: file content must be UTF-8 text`);
     else if (utf8Length(body) > LIMITS.fileBytes) errors.push(`${path}: exceeds ${LIMITS.fileBytes} bytes`);
-    if (!(path in manifest.files)) errors.push(`${path}: extra file not listed in the manifest`);
+    if (!own(manifest.files, path)) errors.push(`${path}: extra file not listed in the manifest`);
   }
-  for (const path of Object.keys(manifest.files)) if (!(path in files)) errors.push(`${path}: listed in the manifest but missing`);
+  for (const path of Object.keys(manifest.files)) if (!own(files, path)) errors.push(`${path}: listed in the manifest but missing`);
   if (errors.length) return { ok: false, stage: "integrity", errors };
   for (const path of paths) {
     if ((await sha256(utf8(files[path] as string))) !== manifest.files[path]) errors.push(`${path}: bytes do not match the manifest digest`);
   }
   if ((await manifestContentDigest(manifest, sha256)) !== manifest.content_digest) errors.push("manifest content_digest does not match its fields");
+  for (const required of [FILE_EXPERIMENT, FILE_LEDGER, FILE_SUMMARY]) if (!own(files, required)) errors.push(`${required} is required`);
   if (errors.length) return { ok: false, stage: "integrity", errors };
 
   const parseFile = (path: string): unknown => {
     try {
-      return JSON.parse(files[path] as string);
+      const value = JSON.parse(files[path] as string) as unknown;
+      const b = shapeBoundsErrors(value);
+      if (b.length) errors.push(...b.map((x) => `${path}: ${x}`));
+      return value;
     } catch {
       errors.push(`${path}: not valid JSON`);
       return null;
     }
   };
-  for (const required of [FILE_EXPERIMENT, FILE_LEDGER]) if (!(required in files)) errors.push(`${required} is required`);
-  if (errors.length) return { ok: false, stage: "records", errors };
   const spec = parseFile(FILE_EXPERIMENT);
   const ledger = parseFile(FILE_LEDGER);
+  const declaredSummary = parseFile(FILE_SUMMARY);
   const attempts: unknown[] = [];
-  for (const path of paths.sort(compareCodeUnits)) {
+  const attemptPaths: string[] = [];
+  for (const path of [...paths].sort(compareCodeUnits)) {
     if (!path.startsWith("attempts/")) continue;
-    const value = parseFile(path);
-    const id = (value as { attempt_id?: unknown } | null)?.attempt_id;
-    if (typeof id !== "string" || attemptPath(id) !== path) errors.push(`${path}: file name does not match its attempt_id`);
-    attempts.push(value);
+    attempts.push(parseFile(path));
+    attemptPaths.push(path);
   }
+  if (errors.length) return { ok: false, stage: "file-json", errors };
+  attempts.forEach((value, i) => {
+    const id = (value as { attempt_id?: unknown } | null)?.attempt_id;
+    if (typeof id !== "string" || attemptPath(id) !== attemptPaths[i]) errors.push(`${attemptPaths[i]}: file name does not match its attempt_id`);
+  });
   if (errors.length) return { ok: false, stage: "records", errors };
   const records = parseRunRecords(spec, ledger, attempts);
   if (!records.ok) return { ok: false, stage: "records", errors: records.errors };
@@ -262,11 +277,26 @@ export async function importEnvelopeValue(parsed: unknown, sha256: Sha256Port): 
   if (edition !== manifest.records_edition_digest) digestErrors.push("records_edition_digest does not match the supplied records");
   if (digestErrors.length) return { ok: false, stage: "records", errors: digestErrors };
 
-  const analysed = analyze(r, edition);
-  if (!analysed.ok) return { ok: false, stage: "records", errors: analysed.errors };
-  const recomputedSelection = analysed.value.pairing.selected.map((a) => a.attempt_id);
-  if (canonicalJson(recomputedSelection) !== canonicalJson(manifest.ledger?.selected_attempt_ids ?? null)) {
-    return { ok: false, stage: "records", errors: ["manifest selected attempts disagree with the recomputed policy selection"] };
+  // Rebuild the manifest from the verified records with the manifest's own free-form fields; every derived field
+  // (task hashes, arm digests, selection, exclusions, bootstrap, attestation, file digests) must match.
+  const rebuilt = await buildEnvelope(r, sha256, {
+    kind: manifest.manifest_kind,
+    runtime: manifest.runtime,
+    sourceRefs: manifest.source_refs,
+    transform: manifest.transform,
+    derivation: manifest.derivation,
+    toolVersion: manifest.tool_version,
+  });
+  if (!rebuilt.ok) return { ok: false, stage: "records", errors: rebuilt.errors };
+  if (canonicalJson(rebuilt.value.summary) !== canonicalJson(declaredSummary)) {
+    return { ok: false, stage: "records", errors: ["summary.json disagrees with the summary recomputed from the records"] };
   }
-  return { ok: true, value: { manifest, records: r, summary: analysed.value.summary } };
+  const extra = paths.filter((p) => !own(rebuilt.value.envelope.files, p));
+  const derivedFiles: Record<string, Digest> = { ...rebuilt.value.envelope.manifest.files };
+  for (const p of extra) derivedFiles[p] = manifest.files[p]!;
+  const expected = { ...rebuilt.value.envelope.manifest, files: derivedFiles, content_digest: manifest.content_digest };
+  if (canonicalJson(expected) !== canonicalJson(manifest)) {
+    return { ok: false, stage: "records", errors: ["manifest derived fields (hashes, selection, exclusions, bootstrap, attestation or file digests) disagree with the records"] };
+  }
+  return { ok: true, value: { manifest, records: r, summary: rebuilt.value.summary } };
 }

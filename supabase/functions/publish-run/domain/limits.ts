@@ -68,6 +68,7 @@ export function relativePathError(path: unknown): string | null {
     if (segment === "." || segment === "..") return "path has a dot segment";
     if (/[<>:"|?*]/.test(segment)) return "path has a reserved character";
     if (/[ .]$/.test(segment)) return "path segment ends with a space or dot";
+    if (/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|$)/i.test(segment)) return "path segment is a reserved device name";
   }
   return null;
 }

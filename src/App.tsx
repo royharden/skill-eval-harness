@@ -32,6 +32,7 @@ const STAGE_TEXT: Record<string, string> = {
   json: "Not valid JSON",
   schema: "Schema error",
   integrity: "Integrity check failed",
+  "file-json": "A bundle file is not valid JSON",
   records: "Record validation failed",
 };
 
@@ -197,7 +198,7 @@ export function App() {
           {snapshotNote}
         </p>
       ) : null}
-      {snapshot ? <RunReport summary={snapshot.summary} records={snapshot.records} manifest={snapshot.manifest} /> : null}
+      {snapshot ? <RunReport key={`snapshot-${snapshot.manifest.content_digest}`} summary={snapshot.summary} records={snapshot.records} manifest={snapshot.manifest} /> : null}
 
       <section aria-labelledby="load-title">
         <h2 id="load-title">Load records</h2>
@@ -227,9 +228,9 @@ export function App() {
         ) : null}
       </section>
 
-      {run ? <RunReport summary={run.summary} records={run.records} manifest={run.source === "import" ? run.manifest : null} /> : null}
+      {run ? <RunReport key={`report-${run.manifest.content_digest}`} summary={run.summary} records={run.records} manifest={run.source === "import" ? run.manifest : null} /> : null}
       {legacy ? <LegacyReport view={legacy} /> : null}
-      {run ? <ExportPanel records={run.records} manifest={run.manifest} /> : null}
+      {run ? <ExportPanel key={`export-${run.manifest.content_digest}`} records={run.records} manifest={run.manifest} /> : null}
 
       <PersistencePanel client={client} run={run} />
 

@@ -30,6 +30,8 @@ export function PersistencePanel({ client, run }: { client: SupabaseClient | nul
   useEffect(() => {
     if (!client) return;
     let active = true;
+    // Fallback in case the recovery event fired before this subscription existed.
+    if (/type=recovery/.test(window.location.hash)) setRecovering(true);
     client.auth
       .getSession()
       .then(({ data }) => {
@@ -172,6 +174,9 @@ export function PersistencePanel({ client, run }: { client: SupabaseClient | nul
           </div>
           <button type="submit" disabled={busy}>
             Set new password
+          </button>
+          <button type="button" className="secondary" disabled={busy} onClick={() => setRecovering(false)}>
+            Cancel
           </button>
         </form>
       ) : session ? (

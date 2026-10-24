@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { RunRecords } from "../../supabase/functions/publish-run/domain/contracts.ts";
+import { utf8Length } from "../../supabase/functions/publish-run/domain/limits.ts";
 import { envelopeText, type RunManifest } from "../../supabase/functions/publish-run/domain/manifest.ts";
 import { DEFAULT_SANITIZE, sanitizeForExport, type SanitizeOptions } from "../../supabase/functions/publish-run/domain/sanitize.ts";
 import { downloadText } from "../lib/download.ts";
@@ -23,7 +24,7 @@ export function ExportPanel({ records, manifest }: { records: RunRecords; manife
       }
       const text = envelopeText(result.value.envelope);
       setPreview({ text, filename: `${records.ledger.run_id}.sanitized.json` });
-      setStatus(`Preview ready: ${text.length.toLocaleString("en-US")} characters. These are the exact bytes the download writes.`);
+      setStatus(`Preview ready: ${utf8Length(text).toLocaleString("en-US")} bytes (UTF-8). These are the exact bytes the download writes.`);
     } catch (error) {
       setStatus(error instanceof Error ? `Export failed: ${error.message}` : "Export failed.");
     } finally {

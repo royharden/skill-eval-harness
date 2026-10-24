@@ -378,12 +378,12 @@ export function parseAttempt(value: unknown, path = "attempt"): Result<AttemptRe
  * Validates spec + ledger + attempts together and checks cross-record consistency:
  * one run, one schema, ledger sides match the spec plan, attempt ids are unique and referenced exactly once.
  */
-export function parseRunRecords(spec: unknown, ledger: unknown, attempts: unknown[]): Result<RunRecords> {
+export function parseRunRecords(spec: unknown, ledger: unknown, attemptsValue: unknown): Result<RunRecords> {
   const c = new Checker();
   checkSpec(c, spec);
   checkLedger(c, ledger);
-  if (attempts.length > LIMITS.attempts) c.fail("attempts", `at most ${LIMITS.attempts} attempts`);
-  else attempts.forEach((a, i) => checkAttempt(c, a, `attempts[${i}]`));
+  const attempts = c.arr(attemptsValue, "attempts", LIMITS.attempts) ?? [];
+  attempts.forEach((a, i) => checkAttempt(c, a, `attempts[${i}]`));
   if (c.errors.length) return { ok: false, errors: c.errors };
 
   const s = spec as ExperimentSpec;

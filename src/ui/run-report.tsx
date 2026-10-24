@@ -115,6 +115,13 @@ export function RunReport({ summary, records, manifest }: { summary: RunSummary;
           </tbody>
         </table>
       </div>
+      {[summary.arms.baseline, summary.arms.treatment]
+        .filter((a) => a.cost.ratio_note)
+        .map((a) => (
+          <p key={`ratio-${a.arm_id}`} className="meta">
+            {a.arm_id}: {a.cost.ratio_note}
+          </p>
+        ))}
       <p className="meta">
         Wilson intervals pool correlated repeats and are descriptive. Cost totals include every executed attempt; ratios use selected attempts
         and are suppressed when any executed attempt has unknown cost or nothing passed.

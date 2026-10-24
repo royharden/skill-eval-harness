@@ -1,7 +1,7 @@
 // Allowlist sanitization for distributable exports (PLAN.md §10). Export is not publication.
 // Fields are rebuilt from an allowlist; free-text scrubbing is supplemental, not the primary control.
 
-import type { AttemptRecord, ExperimentSpec, LedgerEdition, Result, RunRecords, Sha256Port } from "./contracts.ts";
+import type { ArmDescriptor, AttemptRecord, ExperimentSpec, LedgerEdition, Result, RunRecords, Sha256Port } from "./contracts.ts";
 import { sealSpec, type UnsealedSpec } from "./digests.ts";
 import { buildEnvelope, type Envelope, type RunManifest, type SourceRef } from "./manifest.ts";
 import type { RunSummary } from "./summary.ts";
@@ -15,12 +15,31 @@ export interface SanitizeOptions {
   keepCheckDetails: boolean;
   /** Keep the experiment notes label (scrubbed). Default true. */
   keepNotes: boolean;
+  /** Keep attempt terminal reasons and error text (scrubbed). Default false: replaced with status-derived text. */
+  keepReasons: boolean;
 }
 
-export const DEFAULT_SANITIZE: SanitizeOptions = { keepTaskLabels: false, keepCheckDetails: false, keepNotes: true };
+export const DEFAULT_SANITIZE: SanitizeOptions = { keepTaskLabels: false, keepCheckDetails: false, keepNotes: true, keepReasons: false };
+
+/** Runtime keys that may be exported, each with a value pattern; everything else is dropped. */
+const RUNTIME_ALLOW: Record<string, RegExp> = {
+  os: /^(win32|linux|darwin|freebsd|openbsd|sunos|aix)$/,
+  node: /^v\d+\.\d+\.\d+$/,
+  cli: /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/,
+};
+
+export function sanitizeRuntime(runtime: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, pattern] of Object.entries(RUNTIME_ALLOW)) {
+    const value = Object.prototype.hasOwnProperty.call(runtime, key) ? runtime[key] : undefined;
+    if (typeof value === "string" && pattern.test(value)) out[key] = value;
+  }
+  return out;
+}
 
 const SCRUBBERS: Array<[RegExp, string]> = [
-  [/[A-Za-z]:\\[^\s"'<>|]*/g, "<path>"],
+  // Windows paths may contain spaces ("C:\Program Files\..."): consume to the end of the quoted/line segment.
+  [/[A-Za-z]:\\[^"'<>|\r\n]*/g, "<path>"],
   [/\\\\[^\s"'<>|]+/g, "<path>"],
   [/(?:\/Users|\/home|\/root|\/mnt|\/var|\/tmp|\/private)\/[^\s"'<>]*/g, "<path>"],
   [/~\/[^\s"'<>]*/g, "<path>"],
@@ -44,10 +63,24 @@ export function sanitizeRules(options: SanitizeOptions): string[] {
     options.keepCheckDetails ? "check details kept (scrubbed)" : "check details replaced with pass/fail text",
     "raw trace digests withheld as source_refs; raw traces never exported",
     "exposure event references withheld",
-    "terminal reasons, errors, tool summary and notes scrubbed for paths, emails and secret-like tokens",
+    options.keepReasons ? "terminal reasons and errors kept (scrubbed)" : "terminal reasons replaced with status text; error text withheld",
+    "tool summary and notes scrubbed for paths, emails and secret-like tokens",
+    "runtime metadata limited to os, node and cli version values of known shape",
     "environment variable values never present (names only)",
     "experiment digest recomputed for the transformed spec; arm and task content digests unchanged",
   ];
+}
+
+function armInput(arm: ArmDescriptor): UnsealedSpec["arms"][number] {
+  return {
+    arm_id: arm.arm_id,
+    artifact_kind: arm.artifact_kind,
+    artifact_digest: arm.artifact_digest,
+    bundle_files_digest: arm.bundle_files_digest,
+    exposure_mode: arm.exposure_mode,
+    prompt_overlay_digest: arm.prompt_overlay_digest,
+    config_differences: arm.config_differences.map(scrubText),
+  };
 }
 
 function sanitizeAttempt(a: AttemptRecord, experimentDigest: string, options: SanitizeOptions): AttemptRecord {
@@ -73,9 +106,17 @@ function sanitizeAttempt(a: AttemptRecord, experimentDigest: string, options: Sa
     fixture_digest: a.fixture_digest,
     grader_digest: a.grader_digest,
     artifact_digest: a.artifact_digest,
-    lifecycle: { ...a.lifecycle },
+    lifecycle: {
+      planned_at: a.lifecycle.planned_at,
+      materialized_at: a.lifecycle.materialized_at,
+      agent_started_at: a.lifecycle.agent_started_at,
+      first_event_at: a.lifecycle.first_event_at,
+      agent_terminal_at: a.lifecycle.agent_terminal_at,
+      grader_terminal_at: a.lifecycle.grader_terminal_at,
+      finalized_at: a.lifecycle.finalized_at,
+    },
     status: a.status,
-    terminal_reason: scrubText(a.terminal_reason),
+    terminal_reason: options.keepReasons ? scrubText(a.terminal_reason) : `status ${a.status}`,
     exit_code: a.exit_code,
     grade: a.grade
       ? {
@@ -91,13 +132,19 @@ function sanitizeAttempt(a: AttemptRecord, experimentDigest: string, options: Sa
       : null,
     trace: { digest: null, bytes: null, truncated: a.trace.truncated },
     exposure: { status: a.exposure.status, mechanism: a.exposure.mechanism, artifact_digest: a.exposure.artifact_digest, event_ref: null },
-    usage: { ...a.usage },
-    cost: { ...a.cost },
+    usage: {
+      input_tokens: a.usage.input_tokens,
+      output_tokens: a.usage.output_tokens,
+      cache_read_tokens: a.usage.cache_read_tokens,
+      cache_write_tokens: a.usage.cache_write_tokens,
+      semantics: a.usage.semantics === null ? null : scrubText(a.usage.semantics),
+    },
+    cost: { usd: a.cost.usd, source: a.cost.source, pricing_snapshot: a.cost.pricing_snapshot === null ? null : scrubText(a.cost.pricing_snapshot) },
     turns: a.turns,
     duration_ms: a.duration_ms,
     cleanup: a.cleanup,
     retry_qualified: a.retry_qualified,
-    errors: a.errors.map(scrubText),
+    errors: options.keepReasons ? a.errors.map(scrubText) : [],
     attestation: a.attestation,
   };
 }
@@ -118,7 +165,7 @@ export async function sanitizeForExport(
   const unsealed: UnsealedSpec = {
     schema_version: s.schema_version,
     experiment_id: s.experiment_id,
-    suite: { ...s.suite },
+    suite: { suite_id: s.suite.suite_id, version: s.suite.version, digest: s.suite.digest },
     tasks: [...s.tasks]
       .sort((a, b) => (a.task_id < b.task_id ? -1 : a.task_id > b.task_id ? 1 : 0))
       .map((t, i) => ({
@@ -141,20 +188,44 @@ export async function sanitizeForExport(
     ambient_context_digest: s.ambient_context_digest,
     repeats: s.repeats,
     scheduling_seed: s.scheduling_seed,
-    retry_policy: { ...s.retry_policy },
-    limits: { ...s.limits },
+    retry_policy: { startup_retries: s.retry_policy.startup_retries, selection: s.retry_policy.selection },
+    limits: {
+      first_event_timeout_ms: s.limits.first_event_timeout_ms,
+      agent_timeout_ms: s.limits.agent_timeout_ms,
+      grader_timeout_ms: s.limits.grader_timeout_ms,
+      max_output_bytes: s.limits.max_output_bytes,
+      max_attempts: s.limits.max_attempts,
+      max_usd: s.limits.max_usd,
+      max_tokens: s.limits.max_tokens,
+      run_deadline: s.limits.run_deadline,
+      enforcement: s.limits.enforcement,
+    },
     intervention: s.intervention,
-    arms: [
-      { ...s.arms[0], config_differences: [...s.arms[0].config_differences] },
-      { ...s.arms[1], config_differences: [...s.arms[1].config_differences] },
-    ].map(({ arm_digest: _d, ...rest }) => {
-      void _d;
-      return rest;
-    }) as UnsealedSpec["arms"],
+    arms: [armInput(s.arms[0]), armInput(s.arms[1])],
     notes: options.keepNotes ? scrubText(s.notes) : "",
   };
   const spec: ExperimentSpec = await sealSpec(unsealed, sha256);
-  const ledger: LedgerEdition = { ...records.ledger, experiment_digest: spec.experiment_digest, note: scrubText(records.ledger.note), sides: records.ledger.sides.map((side) => ({ ...side, attempt_ids: [...side.attempt_ids] })) };
+  const l = records.ledger;
+  const ledger: LedgerEdition = {
+    schema_version: l.schema_version,
+    run_id: l.run_id,
+    experiment_digest: spec.experiment_digest,
+    edition: l.edition,
+    kind: l.kind,
+    predecessor_digest: l.predecessor_digest,
+    created_at: l.created_at,
+    note: options.keepReasons ? scrubText(l.note) : `${l.kind} edition`,
+    sides: l.sides.map((side) => ({
+      task_id: side.task_id,
+      repeat_id: side.repeat_id,
+      arm_id: side.arm_id,
+      order_index: side.order_index,
+      order_in_pair: side.order_in_pair,
+      state: side.state,
+      attempt_ids: [...side.attempt_ids],
+      selected_attempt_id: side.selected_attempt_id,
+    })),
+  };
   const attempts = records.attempts.map((a) => sanitizeAttempt(a, spec.experiment_digest, options));
   const sanitized: RunRecords = { spec, ledger, attempts };
 
@@ -166,7 +237,7 @@ export async function sanitizeForExport(
 
   const built = await buildEnvelope(sanitized, sha256, {
     kind: "sanitized",
-    runtime: Object.fromEntries(Object.entries(privateManifest.runtime).map(([k, v]) => [k, scrubText(v)])),
+    runtime: sanitizeRuntime(privateManifest.runtime),
     sourceRefs,
     transform: { version: SANITIZE_VERSION, rules: sanitizeRules(options), source_manifest_digest: privateManifest.content_digest, source_experiment_digest: s.experiment_digest },
     derivation: "sanitized edition derived from the private records by the allowlist transform; summary recomputed from the sanitized edition",

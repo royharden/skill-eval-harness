@@ -92,7 +92,8 @@ export interface Adapter {
   /** Child environment additions for per-attempt isolation (names only are recorded). */
   isolation_env(paths: AttemptPaths): Record<string, string>;
   invocation(ctx: InvocationContext): Invocation;
-  parser(arm: ArmDescriptor, candidate: CandidateArtifact | null): EventParser;
+  /** workspace lets parsers anchor file-read exposure to the installed artifact path. */
+  parser(arm: ArmDescriptor, candidate: CandidateArtifact | null, workspace: string | null): EventParser;
   /** argv to print the CLI version during preflight, or null. */
   version_argv(binary: string): string[] | null;
 }

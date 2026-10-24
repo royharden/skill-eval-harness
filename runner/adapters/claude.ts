@@ -2,8 +2,10 @@
 // the supplied plans; none has been executed by this repo. Activation must check current official docs/help,
 // pin the installed binary and run disposable canaries before any capability is marked verified.
 //
-// Candidate invocation: claude -p <prompt> --output-format stream-json --verbose --model <id> --permission-mode acceptEdits
+// Candidate invocation: claude -p --output-format stream-json --verbose --model <id> --permission-mode acceptEdits -- <prompt>
 // Candidate native skill root: <workspace>/.claude/skills/<frontmatter-name>/SKILL.md
+// Exposure is "observed" only when a Skill invocation or a Read of the installed SKILL.md has a matching
+// successful tool_result. A tool_use request alone is not evidence.
 
 import type { ArmDescriptor } from "../../supabase/functions/publish-run/domain/contracts.ts";
 import type { CandidateArtifact } from "../suite.ts";
@@ -16,11 +18,27 @@ function contentBlocks(event: Record<string, unknown>): Array<Record<string, unk
   return Array.isArray(message?.content) ? (message!.content as Array<Record<string, unknown>>).filter((b) => b && typeof b === "object") : [];
 }
 
-export function claudeParser(arm: ArmDescriptor, candidate: CandidateArtifact | null): EventParser {
+function norm(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+/g, "/");
+}
+
+/** True if file_path is the installed SKILL.md: workspace-relative, or absolute under the attempt workspace. */
+export function isInstalledSkillPath(filePath: string, candidateName: string, workspace: string | null): boolean {
+  const rel = `${SKILL_ROOT}/${candidateName}/SKILL.md`;
+  const p = norm(filePath);
+  if (p === rel || p === `./${rel}`) return true;
+  if (!workspace) return false;
+  const abs = `${norm(workspace).replace(/\/$/, "")}/${rel}`;
+  return process.platform === "win32" ? p.toLowerCase() === abs.toLowerCase() : p === abs;
+}
+
+export function claudeParser(arm: ArmDescriptor, candidate: CandidateArtifact | null, workspace: string | null = null): EventParser {
   const state = emptyParsedState();
   state.usage.semantics = "claude-code stream-json result.usage (hypothesis)";
-  if (arm.arm_id === "baseline") state.exposure = { status: "unsupported", mechanism: "none", artifact_digest: null, event_ref: null };
-  else if (candidate && candidate.kind !== "skill") state.exposure = { status: "unsupported", mechanism: "none", artifact_digest: null, event_ref: null };
+  const unsupported = arm.arm_id === "baseline" || !candidate || candidate.kind !== "skill" || arm.exposure_mode === "forced-content";
+  if (unsupported) state.exposure = { status: "unsupported", mechanism: "none", artifact_digest: null, event_ref: null };
+  // tool_use id -> mechanism, awaiting a successful tool_result.
+  const pending = new Map<string, "native-invocation" | "file-read">();
   let line = 0;
   return {
     push(text: string): boolean {
@@ -46,20 +64,31 @@ export function claudeParser(arm: ArmDescriptor, candidate: CandidateArtifact | 
         for (const block of contentBlocks(event)) {
           if (block.type !== "tool_use") continue;
           state.action_observed = true;
+          if (unsupported || !candidate || typeof block.id !== "string") continue;
           const input = (block.input ?? {}) as Record<string, unknown>;
-          if (arm.arm_id !== "treatment" || !candidate || candidate.kind !== "skill") continue;
           if (block.name === "Skill" && (input.skill === candidate.name || input.command === candidate.name || input.name === candidate.name)) {
-            state.exposure = { status: "observed", mechanism: "native-invocation", artifact_digest: candidate.artifact_digest, event_ref: `stdout:${line}` };
-          } else if (block.name === "Read" && typeof input.file_path === "string" && input.file_path.replace(/\\/g, "/").endsWith(`${SKILL_ROOT}/${candidate.name}/SKILL.md`) && state.exposure.status !== "observed") {
-            state.exposure = { status: "observed", mechanism: "file-read", artifact_digest: candidate.artifact_digest, event_ref: `stdout:${line}` };
+            pending.set(block.id, "native-invocation");
+          } else if (block.name === "Read" && typeof input.file_path === "string" && isInstalledSkillPath(input.file_path, candidate.name, workspace)) {
+            pending.set(block.id, "file-read");
           }
         }
         return false;
       }
-      if (event.type === "user") return false;
+      if (event.type === "user") {
+        for (const block of contentBlocks(event)) {
+          if (block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
+          const mechanism = pending.get(block.tool_use_id);
+          pending.delete(block.tool_use_id);
+          if (!mechanism || !candidate || block.is_error === true) continue;
+          if (state.exposure.status !== "observed" || (state.exposure.mechanism === "file-read" && mechanism === "native-invocation")) {
+            state.exposure = { status: "observed", mechanism, artifact_digest: candidate.artifact_digest, event_ref: `stdout:${line}` };
+          }
+        }
+        return false;
+      }
       if (event.type === "result") {
-        const isError = event.is_error === true || (typeof event.subtype === "string" && event.subtype !== "success");
-        state.terminal = isError ? { ok: false, reason: `result ${String(event.subtype)}${event.is_error === true ? " (is_error)" : ""}` } : { ok: true, reason: "result success" };
+        const ok = event.subtype === "success" && event.is_error !== true;
+        state.terminal = ok ? { ok: true, reason: "result success" } : { ok: false, reason: `result ${String(event.subtype ?? "without subtype")}${event.is_error === true ? " (is_error)" : ""}` };
         const usage = (event.usage ?? {}) as Record<string, unknown>;
         state.usage = {
           input_tokens: nonNegInt(usage.input_tokens),
@@ -111,13 +140,14 @@ export const claudeAdapter: Adapter = {
   isolation_env: (paths) => ({ HOME: paths.home, USERPROFILE: paths.home, CLAUDE_CONFIG_DIR: `${paths.home}/.claude` }),
   invocation(ctx: InvocationContext) {
     const flags = claudeAdapter.tool_permission_config(ctx.spec).argv_flags;
+    // "--" keeps a prompt that starts with "-" from being parsed as a flag (hypothesis: verify at activation).
     return {
-      argv: [ctx.binary, "-p", ctx.prompt, "--output-format", "stream-json", "--verbose", "--model", ctx.spec.requested_model_id, ...flags],
+      argv: [ctx.binary, "-p", "--output-format", "stream-json", "--verbose", "--model", ctx.spec.requested_model_id, ...flags, "--", ctx.prompt],
       env: ctx.env,
       cwd: ctx.paths.workspace,
       stdin: null,
     };
   },
-  parser: (arm, candidate) => claudeParser(arm, candidate),
+  parser: (arm, candidate, workspace) => claudeParser(arm, candidate, workspace),
   version_argv: (binary) => [binary, "--version"],
 };

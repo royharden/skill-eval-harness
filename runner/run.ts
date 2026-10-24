@@ -150,8 +150,10 @@ async function runAttempt(p: Prepared, store: RunStore, runId: string, side: Pla
   const prompt = overlay === null ? task.prompt : `${overlay}\n\n${task.prompt}`;
   const effectivePromptDigest = sha256Hex(utf8(prompt));
   const env = childEnv(spec, adapter, { workspace, home });
+  // Create per-attempt isolation dirs (e.g. CLAUDE_CONFIG_DIR, CODEX_HOME) that live under the attempt home.
+  for (const dir of Object.values(adapter.isolation_env({ workspace, home }))) if (isWithin(home, dir)) await mkdir(dir, { recursive: true });
   const invocation = adapter.invocation({ spec, suite_root: p.suite.root, task, arm, candidate: p.suite.candidate, paths: { workspace, home }, repeat_id: side.repeat_id, attempt_id: attemptId, prompt, env, binary: p.binary });
-  const parser = adapter.parser(arm, arm.arm_id === "treatment" ? p.suite.candidate : null);
+  const parser = adapter.parser(arm, arm.arm_id === "treatment" ? p.suite.candidate : null, workspace);
   const marker = { attempt_id: attemptId, task_id: side.task_id, repeat_id: side.repeat_id, arm_id: side.arm_id, attempt_no: attemptNo, pid: null as number | null, dispatched_at: now() };
   await store.markInflight(marker);
 

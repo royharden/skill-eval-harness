@@ -35,9 +35,10 @@ unavailable, degenerate or includes zero. Results apply only to the selected sui
 | Claude Code and Codex adapters | yes, **hypothesis contracts** | any real CLI invocation; flags/events/discovery roots are unverified |
 | Forward migration, `publish-run` v2 | yes | migration apply, function deploy, RLS tests |
 
-Static checks that did run: a no-emit TypeScript 6.0.3 check of the domain, runner and tests (with `@types/node`
-and a type-only `yaml` shim), and shimmed checks of the React UI and the Deno handler. Those are type checks, not
-builds or tests. No dependency has been installed and there is no lockfile. See `DEVELOPMENT-STATUS.md`.
+Static checks that did run (at commit `3bfb0fe`, 2026-10-24): a no-emit type check of the domain, runner and tests
+with an out-of-tree TypeScript 6.0.3 (this repo pins `typescript ^5.7.3`, so rerun with the installed version), using
+`@types/node` and a type-only `yaml` shim, plus checks of the React UI and the Deno handler against scratch type
+shims. All reported no errors. Those are type checks, not builds or tests. No dependency has been installed and there is no lockfile. See `DEVELOPMENT-STATUS.md`.
 
 ## First journey (written, not exercised)
 

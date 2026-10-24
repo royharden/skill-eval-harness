@@ -1,6 +1,6 @@
 # Bolt infrastructure handoff: skill-eval harness (v2)
 
-Dirty Mode construction — runtime unverified. This is a provisioning inventory, not a receipt. Updated 2026-10-23.
+Dirty Mode construction — runtime unverified. This is a provisioning inventory, not a receipt. Updated 2026-10-24.
 
 ## Target and readiness
 

@@ -1,10 +1,11 @@
 # Development status
 
-Dirty Mode construction — runtime unverified. Updated 2026-10-23 (S20-INT run).
+Dirty Mode construction — runtime unverified. Updated 2026-10-24 (S20-INT run). Static checks below ran at commit `3bfb0fe` with an out-of-tree TypeScript 6.0.3;
+the repo pins `typescript ^5.7.3`, so they must be rerun after install.
 
 | Area | State |
 |---|---|
-| v2 domain (contracts, validators, canonical JSON, digests, pairing, statistics, manifests, envelope, sanitize, graders, pattern matcher) | Written; no-emit `tsc` (TypeScript 6.0.3) clean. Unit tests written, not executed. |
+| v2 domain (contracts, validators, canonical JSON, digests, pairing, statistics, manifests, envelope, sanitize, graders, pattern matcher) | Written; no-emit `tsc` clean at `3bfb0fe`. Unit tests written, not executed. |
 | Browser report / import / export / auth / save / publish / `#pub=` | Written; type-checked only against scratch React/Supabase shims. Not built or opened. |
 | Runner CLI (validate, preflight, dry run, run, resume, report, export) + replay | Written; no-emit `tsc` clean with Node types and a type-only `yaml` shim. Never executed. |
 | Claude Code / Codex adapters | Written as hypothesis contracts with synthetic event fixtures. No real CLI invoked. |

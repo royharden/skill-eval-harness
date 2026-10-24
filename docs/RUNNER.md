@@ -47,13 +47,17 @@ invariant configuration; each arm digest pins the treatment difference (artifact
 ```
 <output_root>/<run_id>/
   experiment.json           resolved ExperimentSpec
-  ledger/edition-NNNN.json  immutable plan/progress/recovery/final editions, each referencing its predecessor
+  ledger/edition-NNNN.json  immutable plan/recovery/final editions, each referencing its predecessor
   attempts/<id>.json        immutable AttemptRecords (never overwritten)
   inflight/<id>.json        dispatch markers (crash recovery)
   traces/<id>.log           private bounded raw stdout/stderr — never exported
   snapshots/<id>.json       private captured grader snapshot — never exported
   workspaces/<id>/          fresh agent workspace (own git root, outside existing repos)
   homes/<id>/               per-attempt HOME / config dirs (proposed isolation)
+  budget.json               pinned per-side estimate and caps (must match on resume)
+  cleanup/<id>.json         immutable "cleanup established" records for cleanup_pending attempts
+  grader-inflight/          trusted grader child pids recorded at spawn
+  LOCK                      single-runner lock
   records.jsonl             regenerated convenience index
   manifest.private.json, bundle.private.json   written when the ledger is final
 ```
@@ -115,11 +119,11 @@ credential files; the proposed auth path is passing the selected provider API-ke
 | Harness | Skill discovery | AGENTS.md | CLAUDE.md | Exposure observation | Cost |
 |---|---|---|---|---|---|
 | replay | synthetic | synthetic | synthetic | exposure events in the script | synthetic, no spend |
-| claude-code | hypothesis (`.claude/skills/<name>/`) | refused | hypothesis | Skill tool_use / Read of SKILL.md (hypothesis) | `total_cost_usd` (hypothesis) |
-| codex | hypothesis (`.agents/skills/<name>/`) | hypothesis | refused | command naming SKILL.md (hypothesis); else unknown | unknown |
+| claude-code | hypothesis (`.claude/skills/<name>/`) | refused | hypothesis | Skill or Read of the installed SKILL.md with a successful tool_result (hypothesis) | `total_cost_usd` (hypothesis) |
+| codex | hypothesis (`.agents/skills/<name>/`) | hypothesis | refused | completed exit-0 read verb with the installed SKILL.md as an argument (redirects/in-place edits refused); else unknown | unknown |
 
-Candidate invocations (unverified): `claude -p <prompt> --output-format stream-json --verbose --model <id>
---permission-mode acceptEdits` and `codex exec --json --model <id> --sandbox workspace-write <prompt>`. On Windows,
+Candidate invocations (unverified): `claude -p --output-format stream-json --verbose --model <id>
+--permission-mode acceptEdits -- <prompt>` and `codex exec --json --model <id> --sandbox workspace-write -- <prompt>`. On Windows,
 `CLAUDE_BIN` / `CODEX_BIN` must name a real executable, not a `.cmd`/`.ps1` shim (the shell is disabled).
 Activation must consult current official docs/help, pin installed binaries, and run disposable canaries for global
 leakage and local exposure before any row above changes from hypothesis.

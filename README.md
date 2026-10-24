@@ -23,7 +23,7 @@ unavailable, degenerate or includes zero. Results apply only to the selected sui
 
 ## What is built — and what has not run
 
-**Dirty Mode construction (2026-10-23). Source written and statically inspected; nothing has been executed.**
+**Dirty Mode construction (2026-10-23). Source written and statically inspected. No build, test, CLI, migration or browser run has been executed; only static type checks ran.**
 
 | Area | Built (source) | Not yet run |
 |---|---|---|
@@ -47,7 +47,7 @@ builds or tests. No dependency has been installed and there is no lockfile. See 
 3. `npm run cli -- run examples/experiments/acme-replay.yaml --dry-run`, then without `--dry-run` and with
    `--out <a folder outside any git repo>`. Import `<run>/bundle.private.json` into the page, or
    `npm run cli -- export <run-dir>` for a sanitized bundle.
-4. Live Claude Code / Codex runs need Roy's pinned model ids, machine/account, auth channel and explicit spend and
+4. Live Claude Code / Codex runs need the owner's pinned model ids, machine/account, auth channel and explicit spend and
    attempt limits first. Nothing in this repo authorizes spend.
 
 ## Scripts (after a later, authorized `npm install`)

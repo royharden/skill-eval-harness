@@ -77,7 +77,7 @@ fixture -> must fail. Any invalid task fails the whole suite with reasons. Corre
 ## Replay scripts (synthetic, no model)
 
 `replay/<task_id>/<arm_id>.json`, optionally overridden per repeat by `replay/<task_id>/<arm_id>.r<repeat_id>.json`.
-The replay agent is a real child process (`node dist-runner/cli.mjs __replay-agent <script>`), so lifecycle, deadlines,
+The replay agent is a real child process (`node dist-runner/cli.mjs __replay-agent <script> <workspace>`), so lifecycle, deadlines,
 capture, grading and the writer are the real pipeline. Its records carry attestation `replay-synthetic`.
 
 ```json

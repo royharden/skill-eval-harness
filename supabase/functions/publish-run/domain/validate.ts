@@ -224,8 +224,12 @@ function checkSpec(c: Checker, value: unknown): void {
       checkArm(c, arms[0], "spec.arms[0]", "baseline");
       checkArm(c, arms[1], "spec.arms[1]", "treatment");
       const treatment = arms[1] as Partial<ArmDescriptor>;
-      if (s.intervention === "content-only" && Array.isArray(treatment.config_differences) && treatment.config_differences.length > 0) {
-        c.fail("spec.arms[1].config_differences", "content-only intervention refuses configuration differences");
+      if (s.intervention === "content-only") {
+        (arms as Array<Partial<ArmDescriptor>>).forEach((arm, i) => {
+          if (Array.isArray(arm?.config_differences) && arm.config_differences.length > 0) {
+            c.fail(`spec.arms[${i}].config_differences`, "content-only intervention refuses configuration differences");
+          }
+        });
       }
       if (s.harness_id === "codex" && treatment.artifact_kind === "claude-md") {
         c.fail("spec.arms[1].artifact_kind", "CLAUDE.md under Codex is refused in this version");

@@ -1,6 +1,6 @@
 # Statistics implemented (method s20.taskmean.v1)
 
-Source: `supabase/functions/publish-run/domain/summary.ts` and `stats.ts`. Written and type-checked; the unit tests
+Source: `supabase/functions/publish-run/domain/` — `stats.ts`, `summary.ts`, `pairing.ts` and `wilson.ts` (only `makeRng` is reused from the legacy `bootstrap.ts`). Written and type-checked; the unit tests
 in `tests/v2-stats.test.ts` have not been executed and the numerics have not been independently cross-checked yet.
 
 ## Units

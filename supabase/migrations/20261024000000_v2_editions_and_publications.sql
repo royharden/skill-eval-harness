@@ -104,6 +104,12 @@ begin
        or new.created_at <> old.created_at then
       raise exception 'only visibility and revocation can change';
     end if;
+    if old.revoked_at is not null and new.revoked_at is distinct from old.revoked_at then
+      raise exception 'revocation is final';
+    end if;
+    if new.revoked_at is not null and new.is_public then
+      raise exception 'a revoked publication cannot be public';
+    end if;
     return new;
   end if;
   if new.suite_id is not null then
@@ -186,15 +192,20 @@ begin
     end if;
   end if;
 
-  select e.id into existing from public.suite_editions as e
-  where e.suite_id = target_suite and e.records_edition_digest = p_records_edition_digest;
-  if existing is not null then
-    return jsonb_build_object('suite_id', target_suite, 'edition_id', existing, 'existing', true);
+  if encode(sha256(convert_to(p_content, 'UTF8')), 'hex') <> p_records_edition_digest then
+    raise exception 'records_edition_digest is not the SHA-256 of the content';
   end if;
 
+  -- Race-safe: a concurrent save of the same digest returns the existing edition.
   insert into public.suite_editions (suite_id, owner_id, schema_version, run_id, experiment_digest, records_edition_digest, content)
   values (target_suite, auth.uid(), 's20.run.v2', p_run_id, p_experiment_digest, p_records_edition_digest, p_content)
+  on conflict (suite_id, records_edition_digest) do nothing
   returning id into new_id;
+  if new_id is null then
+    select e.id into existing from public.suite_editions as e
+    where e.suite_id = target_suite and e.records_edition_digest = p_records_edition_digest;
+    return jsonb_build_object('suite_id', target_suite, 'edition_id', existing, 'existing', true);
+  end if;
   return jsonb_build_object('suite_id', target_suite, 'edition_id', new_id, 'existing', false);
 end;
 $$;
@@ -322,13 +333,12 @@ create policy publication_artifacts_owner_select on public.publication_artifacts
   for select to authenticated
   using (exists (select 1 from public.publication_controls as c where c.publication_id = publication_artifacts.id and c.owner_id = auth.uid()));
 
-revoke all on public.suite_editions from anon;
-revoke all on public.publication_artifacts from anon;
-revoke all on public.publication_controls from anon;
-revoke insert, update, delete on public.publication_artifacts from authenticated;
-revoke insert, update, delete on public.publication_controls from authenticated;
-revoke update on public.suite_editions from authenticated;
+-- Start from nothing, then grant back exactly what clients need. Inserts into suite_editions go through
+-- save_suite_edition (invoker rights, so the insert policy and grant below still apply to it).
+revoke all on public.suite_editions from anon, authenticated;
+revoke all on public.publication_artifacts from anon, authenticated;
+revoke all on public.publication_controls from anon, authenticated;
+grant select, insert, delete on public.suite_editions to authenticated;
 grant select on public.publication_artifacts to authenticated;
 grant select on public.publication_controls to authenticated;
 grant update (is_public, revoked_at) on public.publication_controls to authenticated;
-grant select, insert, delete on public.suite_editions to authenticated;

@@ -99,13 +99,15 @@ export async function listMyPublications(client: SupabaseClient): Promise<MyPubl
 }
 
 export async function setVisibility(client: SupabaseClient, id: string, isPublic: boolean): Promise<void> {
-  const { error } = await client.from("publication_controls").update({ is_public: isPublic }).eq("publication_id", id);
+  const { data, error } = await client.from("publication_controls").update({ is_public: isPublic }).eq("publication_id", id).select("publication_id");
   if (error) throw new Error(error.message || "Visibility was not changed.");
+  if (!data || data.length === 0) throw new Error("No publication of yours matched; visibility was not changed.");
 }
 
 export async function revokePublication(client: SupabaseClient, id: string): Promise<void> {
-  const { error } = await client.from("publication_controls").update({ revoked_at: new Date().toISOString(), is_public: false }).eq("publication_id", id);
+  const { data, error } = await client.from("publication_controls").update({ revoked_at: new Date().toISOString(), is_public: false }).eq("publication_id", id).select("publication_id");
   if (error) throw new Error(error.message || "The publication was not revoked.");
+  if (!data || data.length === 0) throw new Error("No publication of yours matched; nothing was revoked.");
 }
 
 export async function deletePublication(client: SupabaseClient, id: string): Promise<void> {

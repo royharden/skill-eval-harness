@@ -220,6 +220,12 @@ async function runAttempt(p: Prepared, store: RunStore, runId: string, side: Pla
     const snapshot = await captureSnapshot(workspace, task.dir, task.graders, task.expected, Math.min(task.grader_timeout_ms ?? spec.limits.grader_timeout_ms, spec.limits.grader_timeout_ms), (pid) => {
       graderCleanupPending = true;
       errors.push(`grader process cleanup unconfirmed (pid ${pid ?? "unknown"}); confirm it is gone before resuming`);
+    }, (graderId, pid) => {
+      try {
+        store.recordGraderPid(attemptId, graderId, pid);
+      } catch (error) {
+        errors.push(`grader pid ${pid} could not be recorded (${error instanceof Error ? error.message : String(error)})`);
+      }
     });
     await store.writePrivate("snapshots", attemptId, canonicalJson(snapshot));
     const outcome = evaluateGraders(task.graders, snapshot);
@@ -304,8 +310,9 @@ function spent(attempts: AttemptRecord[], estimate: number | null): Spent {
   let unknownUsd = 0;
   let unknownTokens = 0;
   for (const a of attempts) {
-    // Affirmative no-start evidence (process never started): nothing was spent.
-    if (a.lifecycle.agent_started_at === null && (a.retry_qualified || a.status === "cancelled")) continue;
+    // Only affirmative no-start evidence (spawn failed before any process existed) counts as zero spend.
+    // Interrupted records (unknown action history) are charged as unknown.
+    if (a.retry_qualified) continue;
     if (a.cost.usd === null) {
       unknownUsd += 1;
       usd += estimate ?? 0;
@@ -380,7 +387,8 @@ export async function executeRun(opts: RunOptions): Promise<RunOutcome | { dryRu
   try {
     if (opts.resume) {
       const pinned = await store.readBudget();
-      if (pinned !== null && canonicalJson(pinned) !== canonicalJson(budgetPin(p))) {
+      if (pinned === null) throw new RunError(["budget.json is missing (the run stopped before its first ledger edition, so nothing was dispatched); start a new run id"]);
+      if (canonicalJson(pinned) !== canonicalJson(budgetPin(p))) {
         throw new RunError(["budget inputs (estimate_usd_per_side or caps) differ from those pinned at run start; changed configuration requires a new run"]);
       }
       const recovered = await recover(store, p, runId, opts.confirmStopped ?? []);
@@ -494,11 +502,12 @@ async function recover(store: RunStore, p: Prepared, runId: string, confirmStopp
   // A dead leader pid is not proof: a descendant can outlive it (that is exactly how cleanup_pending arises).
   // POSIX children are spawned detached, so the pid is also the process-group id and the whole group can be probed.
   // Windows has no equivalent probe here, so the operator must confirm.
-  const check = (attemptId: string, pid: number | null, what: string) => {
+  const check = (key: string, pid: number | null, what: string) => {
+    const attemptId = key.split("#")[0]!;
+    const set = (text: string) => evidence.set(key, text);
     const confirmHint = `confirm nothing for it is still running (including child processes), then resume with --confirm-stopped ${attemptId}`;
     if (confirmed.has(attemptId)) {
-      evidence.set(
-        attemptId,
+      set(
         pid !== null && pidAlive(pid)
           ? `pid ${pid} was alive at resume; the operator confirmed it is not the owned process tree (--confirm-stopped)`
           : "the operator confirmed no process for this attempt is running (--confirm-stopped)",
@@ -508,11 +517,18 @@ async function recover(store: RunStore, p: Prepared, runId: string, confirmStopp
     if (pid === null) throw new RunError([`${what} ${attemptId}: no process id was recorded, so it cannot be checked; ${confirmHint}`]);
     if (pidAlive(pid)) throw new RunError([`${what} ${attemptId}: process ${pid} may still be running; stop it and its children, or if the pid was reused by an unrelated process, ${confirmHint}`]);
     const group = processGroupGone(pid);
-    if (group === true) evidence.set(attemptId, `process group ${pid} has no members at resume (POSIX group probe)`);
+    if (group === true) set(`process group ${pid} has no members at resume (POSIX group probe)`);
     else if (group === false) throw new RunError([`${what} ${attemptId}: process group ${pid} still has members; stop them before resuming`]);
     else throw new RunError([`${what} ${attemptId}: the leader ${pid} exited, but descendants cannot be verified on this OS; ${confirmHint}`]);
   };
-  for (const m of inflight) if (!known.has(m.attempt_id)) check(m.attempt_id, m.pid, "interrupted attempt");
+  for (const m of inflight) {
+    if (known.has(m.attempt_id)) continue;
+    check(m.attempt_id, m.pid, "interrupted attempt");
+    // A crash during grading can leave a trusted grader child running in the workspace.
+    for (const g of await store.readGraderPids(m.attempt_id)) check(`${m.attempt_id}#grader-${g.grader_id}`, g.pid, `grader ${g.grader_id} of interrupted attempt`);
+  }
+  const evidenceFor = (attemptId: string) =>
+    [...evidence.entries()].filter(([k]) => k === attemptId || k.startsWith(`${attemptId}#`)).map(([, v]) => v).join("; ") || "unverified";
   for (const a of attempts) {
     if (a.cleanup !== "cleanup_pending" || store.cleanupEstablished(a.attempt_id)) continue;
     const m = inflight.find((x) => x.attempt_id === a.attempt_id);
@@ -538,7 +554,7 @@ async function recover(store: RunStore, p: Prepared, runId: string, confirmStopp
     }
     const target = sides.find((s) => s.task_id === m.task_id && s.repeat_id === m.repeat_id && s.arm_id === m.arm_id);
     if (!target) continue;
-    const record: AttemptRecord = interruptedRecord(spec, p, runId, target, m.attempt_id, m.attempt_no, m.dispatched_at, evidence.get(m.attempt_id) ?? "unverified");
+    const record: AttemptRecord = interruptedRecord(spec, p, runId, target, m.attempt_id, m.attempt_no, m.dispatched_at, evidenceFor(m.attempt_id));
     await store.writeAttempt(record);
     target.attempt_ids.push(m.attempt_id);
     target.state = "attempted";
@@ -547,7 +563,7 @@ async function recover(store: RunStore, p: Prepared, runId: string, confirmStopp
   }
   const editionNo = latest.ledger.edition + 1;
   for (const a of attempts.filter((x) => x.cleanup === "cleanup_pending" && !store.cleanupEstablished(x.attempt_id))) {
-    const why = evidence.get(a.attempt_id) ?? "unverified";
+    const why = evidenceFor(a.attempt_id);
     await store.markCleanupEstablished(a.attempt_id, editionNo, why);
     notes.push(`cleanup for ${a.attempt_id} established: ${why}`);
   }
@@ -576,7 +592,7 @@ function interruptedRecord(spec: ExperimentSpec, p: Prepared, runId: string, sid
     effective_config_digest: p.resolved.effective_config_digest,
     ambient_context_digest: spec.ambient_context_digest,
     base_prompt_digest: task.descriptor.prompt_digest,
-    effective_prompt_digest: task.descriptor.prompt_digest,
+    effective_prompt_digest: arm.arm_id === "treatment" && p.resolved.overlay !== null ? sha256Hex(utf8(`${p.resolved.overlay}\n\n${task.prompt}`)) : task.descriptor.prompt_digest,
     fixture_digest: task.descriptor.fixture_tree_digest,
     grader_digest: task.descriptor.grader_digest,
     artifact_digest: arm.artifact_digest,

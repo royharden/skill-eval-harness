@@ -75,6 +75,38 @@ function waitExit(child: ChildProcess, ms: number): Promise<boolean> {
 }
 
 /** Terminates the whole owned process tree and reports whether exit was confirmed. */
+/** POSIX group state: "empty" (no members), "members", or "unknown" (cannot probe). */
+function groupState(pgid: number): "empty" | "members" | "unknown" {
+  try {
+    process.kill(-pgid, 0);
+    return "members";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ESRCH" ? "empty" : code === "EPERM" ? "members" : "unknown";
+  }
+}
+
+/**
+ * POSIX: SIGKILL the whole group and poll until it is empty. The leader exiting is not tree exit.
+ * Returns "empty" if nothing was left, "reaped" if members were killed and confirmed gone, "stuck" otherwise.
+ */
+export async function reapGroup(pgid: number, confirmMs: number): Promise<"empty" | "reaped" | "stuck"> {
+  if (groupState(pgid) === "empty") return "empty";
+  try {
+    process.kill(-pgid, "SIGKILL");
+  } catch {
+    /* raced to empty */
+  }
+  const deadline = Date.now() + confirmMs;
+  while (Date.now() < deadline) {
+    const state = groupState(pgid);
+    if (state === "empty") return "reaped";
+    if (state === "unknown") return "stuck";
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return "stuck";
+}
+
 export async function killTree(child: ChildProcess, confirmMs: number): Promise<boolean> {
   const pid = child.pid;
   if (pid === undefined) return true;
@@ -90,14 +122,12 @@ export async function killTree(child: ChildProcess, confirmMs: number): Promise<
     } catch {
       /* group already gone */
     }
-    if (!(await waitExit(child, Math.min(2000, confirmMs)))) {
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {
-        /* group already gone */
-      }
-    }
+    await waitExit(child, Math.min(2000, confirmMs));
+    // Confirm the whole group, not only the leader: SIGKILL survivors and poll until the group is empty.
+    const group = await reapGroup(pid, confirmMs);
+    return (await waitExit(child, confirmMs)) && group !== "stuck";
   }
+  // Windows: taskkill /T is best effort for the tree; only the leader's exit can be confirmed here (not validated).
   return waitExit(child, confirmMs);
 }
 
@@ -243,15 +273,12 @@ export async function runHosted(
       for (const t of timers) clearTimeout(t);
       const done = async () => {
         let cleanup: HostResult["cleanup"] = "not_needed";
-        // POSIX: a detached grandchild that closed its stdio could outlive a normal exit; signal the group (best effort).
-        if (!killing && process.platform !== "win32" && child.pid !== undefined) {
-          try {
-            process.kill(-child.pid, "SIGKILL");
-          } catch {
-            /* group already gone */
-          }
-        }
         if (killing) cleanup = (await killing) ? "confirmed" : "cleanup_pending";
+        else if (process.platform !== "win32" && child.pid !== undefined) {
+          // POSIX: after a normal exit, a detached descendant could outlive the leader; reap and confirm the group.
+          const group = await reapGroup(child.pid, confirmMs);
+          cleanup = group === "empty" ? "not_needed" : group === "reaped" ? "confirmed" : "cleanup_pending";
+        }
         if (spawnError && child.pid === undefined) termination = "spawn_error";
         resolvePromise(finish({ exit_code: code, signal: signal ?? null, cleanup, spawn_error: spawnError, pid: child.pid ?? null }));
       };
@@ -269,6 +296,10 @@ export async function runHosted(
           settled = true;
           clearInterval(watchdog);
           for (const t of timers) clearTimeout(t);
+          // Release our ends so a descendant holding the pipes cannot keep the runner alive.
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          child.unref();
           resolvePromise(finish({ exit_code: child.exitCode, cleanup: "cleanup_pending", pid: child.pid ?? null }));
         }, confirmMs);
       });

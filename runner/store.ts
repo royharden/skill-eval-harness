@@ -119,6 +119,32 @@ export class RunStore {
     renameSync(tmp, target);
   }
 
+  /** Synchronous, atomic record of a trusted grader child pid (checked on resume like the agent pid). */
+  recordGraderPid(attemptId: string, graderId: string, pid: number): void {
+    mkdirSync(this.path("grader-inflight"), { recursive: true });
+    const target = this.path("grader-inflight", `${attemptId}.${graderId}.json`);
+    const tmp = `${target}.tmp-${process.pid}`;
+    writeFileSync(tmp, canonicalJson({ attempt_id: attemptId, grader_id: graderId, pid }), { encoding: "utf8", flag: "wx" });
+    renameSync(tmp, target);
+  }
+
+  async readGraderPids(attemptId: string): Promise<Array<{ grader_id: string; pid: number | null }>> {
+    const dir = this.path("grader-inflight");
+    if (!existsSync(dir)) return [];
+    const out: Array<{ grader_id: string; pid: number | null }> = [];
+    for (const name of (await readdir(dir)).sort()) {
+      if (!name.startsWith(`${attemptId}.`) || !name.endsWith(".json")) continue;
+      try {
+        const v = JSON.parse(await readFile(join(dir, name), "utf8")) as { attempt_id?: unknown; grader_id?: unknown; pid?: unknown };
+        if (v.attempt_id !== attemptId) continue;
+        out.push({ grader_id: String(v.grader_id), pid: Number.isInteger(v.pid) && (v.pid as number) > 0 ? (v.pid as number) : null });
+      } catch {
+        out.push({ grader_id: name, pid: null });
+      }
+    }
+    return out;
+  }
+
   /** Immutable record that cleanup for a cleanup_pending attempt was established at a recovery edition. */
   async markCleanupEstablished(attemptId: string, edition: number, evidence: string): Promise<void> {
     await writeImmutable(this.path("cleanup", `${attemptId}.json`), canonicalJson({ attempt_id: attemptId, recovery_edition: edition, evidence }));

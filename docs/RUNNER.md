@@ -66,7 +66,11 @@ planned → materialized → agent_started → agent_terminal → grader_termina
 grader deadlines are separate. A deadline, output cap or cancel terminates the owned process tree (`taskkill /T /F`
 on Windows, process-group signals on POSIX) and waits for confirmed exit before grading or new dispatch. If exit
 cannot be confirmed the attempt is `cancelled` with `cleanup_pending`, scheduling stops, and resume refuses until
-the process is gone. No OS/version combination has been validated yet.
+the process is gone. On POSIX, "confirmed" means the leader exited and the whole process group was SIGKILLed
+and polled empty (also checked after a normal exit); a descendant that called setsid()/setpgid() left the group and
+is invisible to this probe. On Windows only the leader's exit is confirmed (`taskkill /T /F` is best effort for the
+tree, and nothing checks for grandchildren after a normal exit). No OS/version combination has been validated yet.
+Trusted grader children have their pids recorded at spawn and are checked on resume like the agent.
 
 Status mapping: valid grader success → `pass`; valid failed check → `fail`; agent deadline after the first event →
 `timeout` (a binary failure under the pinned policy); startup, first-event, auth, output-cap, missing terminal event

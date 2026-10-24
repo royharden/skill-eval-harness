@@ -62,6 +62,7 @@ export async function captureSnapshot(
   expected: Record<string, string>,
   graderTimeoutMs: number,
   onCleanupPending?: (pid: number | null) => void,
+  onGraderSpawn?: (graderId: string, pid: number) => void,
 ): Promise<WorkspaceSnapshot> {
   const files: Record<string, CapturedFile> = {};
   const commands: Record<string, CapturedCommand> = {};
@@ -75,7 +76,7 @@ export async function captureSnapshot(
       argv,
       { cwd: workspace, env: graderEnv(), stdin: null },
       { first_event_timeout_ms: null, total_timeout_ms: graderTimeoutMs, max_output_bytes: GRADER_OUTPUT_BYTES },
-      {},
+      { onSpawn: (pid) => onGraderSpawn?.(g.id, pid) },
       makeCancelToken(),
     );
     if (result.cleanup === "cleanup_pending") onCleanupPending?.(result.pid);

@@ -62,7 +62,7 @@ export function replayParser(arm: ArmDescriptor, candidate: CandidateArtifact | 
           };
           {
             const usd = nonNegNumber(event.cost_usd);
-            state.cost = usd === null ? { usd: null, source: "unknown", pricing_snapshot: null } : { usd, source: "reported", pricing_snapshot: "synthetic-replay (no model spend)" };
+            state.cost = usd === null ? { usd: null, source: "unknown", pricing_snapshot: null } : { usd, source: "estimated", pricing_snapshot: "synthetic-replay (no model spend)" };
           }
           state.turns = nonNegInt(event.turns);
           return false;

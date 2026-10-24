@@ -8,7 +8,7 @@ import { digestOf, utf8 } from "../supabase/functions/publish-run/domain/canonic
 import type { ArtifactKind, Digest, TaskDescriptor } from "../supabase/functions/publish-run/domain/contracts.ts";
 import { graderDefErrors, type GraderDef } from "../supabase/functions/publish-run/domain/graders.ts";
 import { isSafeId, relativePathError } from "../supabase/functions/publish-run/domain/limits.ts";
-import { assertPlain, decodeUtf8, FsBoundError, nodeSha256, readTrustedFile, resolveUnder, sha256Hex, treeDigestOf, walkTree, type TreeEntry } from "./fsutil.ts";
+import { assertPlain, decodeUtf8, FsBoundError, isWithin, nodeSha256, readTrustedFile, resolveUnder, sha256Hex, treeDigestOf, walkTree, type TreeEntry } from "./fsutil.ts";
 
 const MAX_YAML_BYTES = 64 * 1024;
 const MAX_PROMPT_BYTES = 64 * 1024;
@@ -121,7 +121,7 @@ async function loadCandidate(root: string, raw: unknown, reasons: string[]): Pro
     if (!fm.fields.description) reasons.push("SKILL.md frontmatter needs a description");
     for (const key of Object.keys(fm.fields)) {
       if (ACTIVE_FRONTMATTER.has(key.toLowerCase())) reasons.push(`SKILL.md frontmatter "${key}" changes tools/model/permissions and is refused under content-only intervention`);
-      else if (key !== "name" && key !== "description" && key !== "license" && key !== "metadata") reasons.push(`SKILL.md frontmatter "${key}" is not supported in this version`);
+      else if (key !== "name" && key !== "description") reasons.push(`SKILL.md frontmatter "${key}" is not supported in this version`);
     }
     return { kind, name, files, artifact_digest: skill.digest, bundle_files_digest: await treeDigestOf(abs), primary_text: text, frontmatter: fm.fields };
   }
@@ -164,6 +164,15 @@ async function loadTask(root: string, id: string, reasons: string[]): Promise<Re
   }
   const fixtureDir = resolveUnder(dir, y.fixture as string);
   const oracleDir = resolveUnder(dir, y.oracle as string);
+  // The fixture is copied into the agent workspace: it must not contain or sit inside trusted-only material.
+  const trusted = [oracleDir, resolve(dir, "graders"), resolve(dir, "task.yaml"), resolve(dir, y.prompt_file as string)];
+  for (const g of y.graders as Array<Record<string, unknown>>) if (g.kind === "file_equals" && typeof g.expected === "string") trusted.push(resolveUnder(dir, g.expected));
+  for (const t of trusted) {
+    if (isWithin(fixtureDir, t) || isWithin(t, fixtureDir)) {
+      reasons.push(`${at}: the fixture overlaps trusted material (${t.slice(dir.length + 1) || "task root"}); oracles, graders and expected files must stay outside the agent workspace`);
+      return null;
+    }
+  }
   const fixture = await walkTree(fixtureDir);
   const oracle = await walkTree(oracleDir);
   const graders = (y.graders as Array<Record<string, unknown>>).map((g) => normalizeGrader(g));
@@ -238,6 +247,9 @@ export async function loadSuite(suiteDir: string): Promise<LoadedSuite> {
         const t = await loadTask(root, id, reasons);
         if (t) tasks.push(t);
       }
+    }
+    if (candidate && candidate.kind !== "skill") {
+      for (const t of tasks) if (t.fixture.some((f) => f.path.toLowerCase() === candidate.name.toLowerCase())) reasons.push(`tasks/${t.descriptor.task_id}: fixture already has ${candidate.name}, which the treatment arm installs at the workspace root`);
     }
     if (reasons.length || !candidate) throw new SuiteError(reasons.length ? reasons : ["candidate could not be loaded"]);
     return {

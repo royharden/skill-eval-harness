@@ -5,7 +5,7 @@
 //   workspaces/<attempt_id>/, homes/<attempt_id>/, records.jsonl (regenerated index), manifest.private.json,
 //   bundle.private.json, LOCK.
 
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { canonicalJson, digestOf, sortAttempts } from "../supabase/functions/publish-run/domain/canonical.ts";
@@ -100,8 +100,19 @@ export class RunStore {
     await writeImmutable(this.path("inflight", `${marker.attempt_id}.json`), canonicalJson(marker));
   }
 
-  async updateInflightPid(marker: InflightMarker): Promise<void> {
-    await writeAtomic(this.path("inflight", `${marker.attempt_id}.pid.json`), canonicalJson(marker));
+  /** Synchronous so the pid is on disk before the runner reads any child output or can crash. */
+  recordInflightPid(marker: InflightMarker): void {
+    mkdirSync(this.path("inflight"), { recursive: true });
+    writeFileSync(this.path("inflight", `${marker.attempt_id}.pid.json`), canonicalJson(marker), { encoding: "utf8", flag: "wx" });
+  }
+
+  /** Immutable record that cleanup for a cleanup_pending attempt was established at a recovery edition. */
+  async markCleanupEstablished(attemptId: string, edition: number, evidence: string): Promise<void> {
+    await writeImmutable(this.path("cleanup", `${attemptId}.json`), canonicalJson({ attempt_id: attemptId, recovery_edition: edition, evidence }));
+  }
+
+  cleanupEstablished(attemptId: string): boolean {
+    return existsSync(this.path("cleanup", `${attemptId}.json`));
   }
 
   async readInflight(): Promise<InflightMarker[]> {

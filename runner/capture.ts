@@ -1,6 +1,8 @@
 // Trusted capture after confirmed agent exit (PLAN.md §6): reads the files graders name and runs trusted grader
 // commands (shell disabled, bounded time/output). Pure evaluation happens in domain/graders.ts.
 
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import type { CapturedCommand, CapturedFile, GraderDef, WorkspaceSnapshot } from "../supabase/functions/publish-run/domain/graders.ts";
 import { MAX_TEXT_CHARS } from "../supabase/functions/publish-run/domain/safe-regex.ts";
@@ -25,6 +27,12 @@ export function expandArgv(argv: string[], vars: { task: string; workspace: stri
   return argv.map((a) => a.replaceAll("{node}", process.execPath).replaceAll("{task}", vars.task).replaceAll("{workspace}", vars.workspace));
 }
 
+async function streamDigest(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
+
 async function captureFile(workspace: string, rel: string): Promise<CapturedFile> {
   let abs: string;
   try {
@@ -36,7 +44,7 @@ async function captureFile(workspace: string, rel: string): Promise<CapturedFile
     const st = await lstat(abs);
     if (!st.isFile() || st.isSymbolicLink()) return { kind: "not-regular" };
     await assertNoLinkedAncestors(workspace, abs);
-    if (st.size > CAPTURE_FILE_BYTES) return { kind: "file", bytes: st.size, text: null, digest: sha256Hex(await readFile(abs)) };
+    if (st.size > CAPTURE_FILE_BYTES) return { kind: "file", bytes: st.size, text: null, digest: await streamDigest(abs) };
     const bytes = new Uint8Array(await readFile(abs));
     const text = decodeUtf8(bytes);
     return { kind: "file", bytes: bytes.length, text: text !== null && text.length <= MAX_TEXT_CHARS ? text : null, digest: sha256Hex(bytes) };

@@ -23,7 +23,7 @@ try {
   fail('CHANGELOG.md is missing');
 }
 
-const lines = text.split('\n');
+const lines = text.split(/\r?\n/);
 const isDefinition = (line) => /^\[[^\]]+\]: /.test(line);
 const first = lines.findIndex(isDefinition);
 if (first === -1) {

@@ -74,7 +74,19 @@ export async function loadExperimentFile(path: string): Promise<{ file: Experime
   const retries = y.startup_retries ?? 0;
   if (typeof retries !== "number" || !Number.isInteger(retries) || retries < 0 || retries > 3) r.push("startup_retries must be 0-3 (default 0)");
   const limits = (y.limits ?? {}) as ExperimentFile["limits"];
-  if (typeof limits !== "object" || Array.isArray(limits)) r.push("limits must be a mapping");
+  if (!limits || typeof limits !== "object" || Array.isArray(limits)) r.push("limits must be a mapping");
+  else {
+    const L = limits as Record<string, unknown>;
+    const known = ["first_event_timeout_ms", "agent_timeout_ms", "grader_timeout_ms", "max_output_bytes", "max_attempts", "max_usd", "max_tokens", "run_deadline"];
+    for (const k of Object.keys(L)) if (!known.includes(k)) r.push(`limits.${k} is not a known limit`);
+    for (const k of ["first_event_timeout_ms", "agent_timeout_ms", "grader_timeout_ms", "max_output_bytes", "max_attempts"]) {
+      if (L[k] !== undefined && (typeof L[k] !== "number" || !Number.isInteger(L[k]) || (L[k] as number) < 1)) r.push(`limits.${k} must be a positive integer`);
+    }
+    if (typeof L.first_event_timeout_ms === "number" && typeof L.agent_timeout_ms === "number" && L.first_event_timeout_ms > L.agent_timeout_ms) r.push("limits.first_event_timeout_ms must not exceed agent_timeout_ms");
+    if (L.max_usd !== undefined && L.max_usd !== null && (typeof L.max_usd !== "number" || !Number.isFinite(L.max_usd) || L.max_usd < 0)) r.push("limits.max_usd must be null or a non-negative number");
+    if (L.max_tokens !== undefined && L.max_tokens !== null && (typeof L.max_tokens !== "number" || !Number.isInteger(L.max_tokens) || L.max_tokens < 0)) r.push("limits.max_tokens must be null or a non-negative integer");
+    if (L.run_deadline !== undefined && L.run_deadline !== null && (typeof L.run_deadline !== "string" || Number.isNaN(Date.parse(L.run_deadline)))) r.push("limits.run_deadline must be null or an ISO timestamp");
+  }
   if (r.length) throw new ExperimentError(r);
   return {
     dir: dirname(abs),

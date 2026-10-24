@@ -32,6 +32,8 @@ export interface RunOptions {
   runId?: string | null;
   dryRun?: boolean;
   resume?: boolean;
+  /** Attempt ids the operator confirms have no running process (needed when no pid was ever recorded). */
+  confirmStopped?: string[];
   cancel?: CancelToken;
   log?: (line: string) => void;
 }
@@ -132,6 +134,9 @@ async function runAttempt(p: Prepared, store: RunStore, runId: string, side: Pla
   const workspace = store.workspace(attemptId);
   const home = store.home(attemptId);
   const errors: string[] = [];
+  const marker = { attempt_id: attemptId, task_id: side.task_id, repeat_id: side.repeat_id, arm_id: side.arm_id, attempt_no: attemptNo, pid: null as number | null, dispatched_at: now() };
+  // Marker first: a crash during materialization is still visible to resume.
+  await store.markInflight(marker);
 
   await copyTree(task.fixture, workspace);
   await mkdir(home, { recursive: true });
@@ -154,17 +159,13 @@ async function runAttempt(p: Prepared, store: RunStore, runId: string, side: Pla
   for (const dir of Object.values(adapter.isolation_env({ workspace, home }))) if (isWithin(home, dir)) await mkdir(dir, { recursive: true });
   const invocation = adapter.invocation({ spec, suite_root: p.suite.root, task, arm, candidate: p.suite.candidate, paths: { workspace, home }, repeat_id: side.repeat_id, attempt_id: attemptId, prompt, env, binary: p.binary });
   const parser = adapter.parser(arm, arm.arm_id === "treatment" ? p.suite.candidate : null, workspace);
-  const marker = { attempt_id: attemptId, task_id: side.task_id, repeat_id: side.repeat_id, arm_id: side.arm_id, attempt_no: attemptNo, pid: null as number | null, dispatched_at: now() };
-  await store.markInflight(marker);
-
   const host: HostResult = await runHosted(
     invocation.argv,
     { cwd: invocation.cwd, env: invocation.env, stdin: invocation.stdin },
     { first_event_timeout_ms: spec.limits.first_event_timeout_ms, total_timeout_ms: spec.limits.agent_timeout_ms, max_output_bytes: spec.limits.max_output_bytes },
-    { onStdoutLine: (line) => parser.push(line) },
+    { onSpawn: (pid) => store.recordInflightPid({ ...marker, pid }), onStdoutLine: (line) => parser.push(line) },
     cancel,
   );
-  if (host.pid !== null) await store.updateInflightPid({ ...marker, pid: host.pid });
   const parsed: ParsedState = parser.state();
   const traceText = `# private raw capture for ${attemptId}; never exported\n## stdout\n${host.stdout}\n## stderr\n${host.stderr}\n`;
   await store.writePrivate("traces", attemptId, traceText);
@@ -276,26 +277,42 @@ interface Budget {
   attempts: number;
 }
 
-function spent(attempts: AttemptRecord[]): Budget {
+interface Spent extends Budget {
+  /** Executed attempts whose USD or token usage is unknown. */
+  unknown_usd: number;
+  unknown_tokens: number;
+}
+
+/** Known spend; unknown-cost attempts are charged the pinned per-side estimate so a cap cannot be bypassed. */
+function spent(attempts: AttemptRecord[], estimate: number | null): Spent {
   let usd = 0;
   let tokens = 0;
+  let unknownUsd = 0;
+  let unknownTokens = 0;
   for (const a of attempts) {
-    usd += a.cost.usd ?? 0;
+    if (a.cost.usd === null) {
+      unknownUsd += 1;
+      usd += estimate ?? 0;
+    } else usd += a.cost.usd;
+    if (a.usage.input_tokens === null || a.usage.output_tokens === null) unknownTokens += 1;
     tokens += (a.usage.input_tokens ?? 0) + (a.usage.output_tokens ?? 0);
   }
-  return { usd, tokens, attempts: attempts.length };
+  return { usd, tokens, attempts: attempts.length, unknown_usd: unknownUsd, unknown_tokens: unknownTokens };
 }
 
 /** Returns a stop reason if a known cap forbids starting one more side (stop-new-work; overshoot possible in flight). */
-function capStop(spec: ExperimentSpec, file: ExperimentFile, used: Budget, sidesAhead: number, cancel: CancelToken): string | null {
+function capStop(spec: ExperimentSpec, file: ExperimentFile, used: Spent, sidesAhead: number, cancel: CancelToken): string | null {
   if (cancel.cancelled) return "cancelled";
   if (used.attempts >= spec.limits.max_attempts) return `attempt cap ${spec.limits.max_attempts} reached`;
   if (spec.limits.run_deadline && Date.now() >= Date.parse(spec.limits.run_deadline)) return "run deadline reached";
+  if (spec.limits.max_tokens !== null && used.unknown_tokens > 0) return `token cap is set but usage is unknown for ${used.unknown_tokens} executed attempt(s); the cap cannot be enforced, so new work stops`;
   if (spec.limits.max_tokens !== null && used.tokens >= spec.limits.max_tokens) return `token cap ${spec.limits.max_tokens} reached (known usage)`;
   if (spec.limits.max_usd !== null && spec.harness_id !== "replay") {
     const est = file.estimate_usd_per_side;
     if (est === null) return "max_usd is set but no pinned per-side estimate exists; paid dispatch refused";
-    if (used.usd + est * sidesAhead > spec.limits.max_usd) return `USD cap ${spec.limits.max_usd} would be exceeded by the estimate`;
+    if (used.usd + est * sidesAhead > spec.limits.max_usd) {
+      return `USD cap ${spec.limits.max_usd} would be exceeded by the estimate (${used.unknown_usd} unknown-cost attempt(s) charged at the pinned estimate)`;
+    }
   }
   return null;
 }
@@ -331,25 +348,23 @@ export async function executeRun(opts: RunOptions): Promise<RunOutcome | { dryRu
   const runId = opts.runId ?? `${spec.experiment_id}-${new Date().toISOString().replace(/[-:]/g, "").replace(/\..*$/, "")}`;
   const store = new RunStore(resolve(root, runId));
 
+  if (opts.resume && !existsSync(store.dir)) throw new RunError([`${store.dir} does not exist; nothing to resume`]);
+  if (!opts.resume && existsSync(store.dir)) throw new RunError([`${store.dir} already exists; use --resume or a new run id`]);
+  if (!opts.resume) await mkdir(store.dir, { recursive: true });
+  await store.lock();
   let ledger: LedgerEdition;
   let ledgerDigest: string;
-  if (opts.resume) {
-    if (!existsSync(store.dir)) throw new RunError([`${store.dir} does not exist; nothing to resume`]);
-    await store.lock();
-    const recovered = await recover(store, p, runId);
-    ledger = recovered.ledger;
-    ledgerDigest = recovered.digest;
-  } else {
-    if (existsSync(store.dir)) throw new RunError([`${store.dir} already exists; use --resume or a new run id`]);
-    await mkdir(store.dir, { recursive: true });
-    await store.lock();
-    await store.writeSpec(spec);
-    ledger = initialLedger(spec, runId, now());
-    ledgerDigest = await store.writeLedger(ledger);
-  }
-
   let stopReason: string | null = null;
   try {
+    if (opts.resume) {
+      const recovered = await recover(store, p, runId, opts.confirmStopped ?? []);
+      ledger = recovered.ledger;
+      ledgerDigest = recovered.digest;
+    } else {
+      await store.writeSpec(spec);
+      ledger = initialLedger(spec, runId, now());
+      ledgerDigest = await store.writeLedger(ledger);
+    }
     const attempts = await store.readAttempts();
     const sides = ledger.sides.map((s) => ({ ...s, attempt_ids: [...s.attempt_ids] }));
     const order = [...sides].sort((a, b) => a.order_index - b.order_index);
@@ -359,7 +374,7 @@ export async function executeRun(opts: RunOptions): Promise<RunOutcome | { dryRu
       // Admission for a fresh block estimates both sides; each side is still rechecked before dispatch.
       const partner = sides.find((s) => s.task_id === side.task_id && s.repeat_id === side.repeat_id && s.arm_id !== side.arm_id);
       const ahead = side.order_in_pair === 0 && partner?.state === "planned" ? 2 : 1;
-      const stop = capStop(spec, p.file, spent(attempts), ahead, cancel);
+      const stop = capStop(spec, p.file, spent(attempts, p.file.estimate_usd_per_side), ahead, cancel);
       if (stop) {
         stopReason = stop;
         break;
@@ -373,7 +388,7 @@ export async function executeRun(opts: RunOptions): Promise<RunOutcome | { dryRu
         side.state = "attempted";
         side.selected_attempt_id = outcome.record.attempt_id;
         log(`  ${outcome.record.status}: ${outcome.record.terminal_reason}`);
-        const canRetry = outcome.record.retry_qualified && attemptNo <= spec.retry_policy.startup_retries && !outcome.stopReason && !capStop(spec, p.file, spent(attempts), 1, cancel);
+        const canRetry = outcome.record.retry_qualified && attemptNo <= spec.retry_policy.startup_retries && !outcome.stopReason && !capStop(spec, p.file, spent(attempts, p.file.estimate_usd_per_side), 1, cancel);
         const edition = nextEdition(ledger, ledgerDigest, "plan", sides.map((s) => ({ ...s, attempt_ids: [...s.attempt_ids] })), `after ${outcome.record.attempt_id}`);
         ledgerDigest = await store.writeLedger(edition);
         ledger = edition;
@@ -383,7 +398,7 @@ export async function executeRun(opts: RunOptions): Promise<RunOutcome | { dryRu
       }
     }
 
-    const cleanupPending = attempts.some((a) => a.cleanup === "cleanup_pending");
+    const cleanupPending = attempts.some((a) => a.cleanup === "cleanup_pending" && !store.cleanupEstablished(a.attempt_id));
     const canFinalize = !cleanupPending && stopReason !== "cancelled";
     if (canFinalize) {
       const finalSides = ledger.sides.map((s) => (s.state === "planned" ? { ...s, state: "not_started" as const } : s));
@@ -417,7 +432,7 @@ function pidAlive(pid: number): boolean {
  * predecessor. Attempts dispatched but never finalized are recorded as cancelled (unknown action history, no
  * automatic retry). A still-running owned process blocks resume (cleanup first).
  */
-async function recover(store: RunStore, p: Prepared, runId: string): Promise<{ ledger: LedgerEdition; digest: string }> {
+async function recover(store: RunStore, p: Prepared, runId: string, confirmStopped: string[]): Promise<{ ledger: LedgerEdition; digest: string }> {
   const stored = await store.readSpec();
   const spec = p.resolved.spec;
   const mismatches: string[] = [];
@@ -433,11 +448,24 @@ async function recover(store: RunStore, p: Prepared, runId: string): Promise<{ l
   const attempts = await store.readAttempts();
   const known = new Set(attempts.map((a) => a.attempt_id));
   const inflight = await store.readInflight();
-  for (const m of inflight) if (!known.has(m.attempt_id) && m.pid !== null && pidAlive(m.pid)) throw new RunError([`attempt ${m.attempt_id} process ${m.pid} may still be running; confirm it is gone before resuming`]);
+  const confirmed = new Set(confirmStopped);
+  // Establish cleanup first: a live (or unidentifiable) owned process blocks resume.
+  const evidence = new Map<string, string>();
+  const check = (attemptId: string, pid: number | null, what: string) => {
+    if (pid !== null) {
+      if (pidAlive(pid)) throw new RunError([`${what} ${attemptId}: process ${pid} may still be running; stop it (and its children) before resuming`]);
+      evidence.set(attemptId, `owned process ${pid} not running at resume (liveness check; descendants not verifiable)`);
+    } else if (confirmed.has(attemptId)) {
+      evidence.set(attemptId, "no pid was recorded; the operator confirmed no process is running (--confirm-stopped)");
+    } else {
+      throw new RunError([`${what} ${attemptId}: no process id was recorded, so its process cannot be checked. Confirm nothing is running for it, then resume with --confirm-stopped ${attemptId}`]);
+    }
+  };
+  for (const m of inflight) if (!known.has(m.attempt_id)) check(m.attempt_id, m.pid, "interrupted attempt");
   for (const a of attempts) {
-    if (a.cleanup !== "cleanup_pending") continue;
+    if (a.cleanup !== "cleanup_pending" || store.cleanupEstablished(a.attempt_id)) continue;
     const m = inflight.find((x) => x.attempt_id === a.attempt_id);
-    if (m?.pid && pidAlive(m.pid)) throw new RunError([`attempt ${a.attempt_id} has cleanup pending and process ${m.pid} is alive`]);
+    check(a.attempt_id, m?.pid ?? null, "cleanup-pending attempt");
   }
 
   const sides = latest.ledger.sides.map((s) => ({ ...s, attempt_ids: [...s.attempt_ids] }));
@@ -458,19 +486,24 @@ async function recover(store: RunStore, p: Prepared, runId: string): Promise<{ l
     }
     const target = sides.find((s) => s.task_id === m.task_id && s.repeat_id === m.repeat_id && s.arm_id === m.arm_id);
     if (!target) continue;
-    const record: AttemptRecord = interruptedRecord(spec, p, runId, target, m.attempt_id, m.attempt_no, m.dispatched_at);
+    const record: AttemptRecord = interruptedRecord(spec, p, runId, target, m.attempt_id, m.attempt_no, m.dispatched_at, evidence.get(m.attempt_id) ?? "unverified");
     await store.writeAttempt(record);
     target.attempt_ids.push(m.attempt_id);
     target.state = "attempted";
     target.selected_attempt_id = m.attempt_id;
     notes.push(`recorded interrupted ${m.attempt_id} as cancelled`);
   }
-  for (const a of attempts.filter((x) => x.cleanup === "cleanup_pending")) notes.push(`cleanup for ${a.attempt_id} established at resume (process not running)`);
-  const edition: LedgerEdition = { ...latest.ledger, edition: latest.ledger.edition + 1, kind: "recovery", predecessor_digest: latest.digest, created_at: now(), sides, note: notes.join("; ") || "resumed with no interrupted attempts" };
+  const editionNo = latest.ledger.edition + 1;
+  for (const a of attempts.filter((x) => x.cleanup === "cleanup_pending" && !store.cleanupEstablished(x.attempt_id))) {
+    const why = evidence.get(a.attempt_id) ?? "unverified";
+    await store.markCleanupEstablished(a.attempt_id, editionNo, why);
+    notes.push(`cleanup for ${a.attempt_id} established: ${why}`);
+  }
+  const edition: LedgerEdition = { ...latest.ledger, edition: editionNo, kind: "recovery", predecessor_digest: latest.digest, created_at: now(), sides, note: notes.join("; ") || "resumed with no interrupted attempts" };
   return { ledger: edition, digest: await store.writeLedger(edition) };
 }
 
-function interruptedRecord(spec: ExperimentSpec, p: Prepared, runId: string, side: PlanSide, attemptId: string, attemptNo: number, dispatchedAt: string): AttemptRecord {
+function interruptedRecord(spec: ExperimentSpec, p: Prepared, runId: string, side: PlanSide, attemptId: string, attemptNo: number, dispatchedAt: string, cleanupEvidence: string): AttemptRecord {
   const task = p.suite.tasks.find((t) => t.descriptor.task_id === side.task_id)!;
   const arm = side.arm_id === "baseline" ? spec.arms[0] : spec.arms[1];
   return {
@@ -508,7 +541,7 @@ function interruptedRecord(spec: ExperimentSpec, p: Prepared, runId: string, sid
     duration_ms: null,
     cleanup: "not_needed",
     retry_qualified: false,
-    errors: ["owned process was not running at resume; descendants could not be verified"],
+    errors: [cleanupEvidence],
     attestation: spec.harness_id === "replay" ? "replay-synthetic" : "runner",
   };
 }

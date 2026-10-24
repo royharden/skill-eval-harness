@@ -16,7 +16,7 @@ try {
   text = '';
 }
 
-const lines = text.split('\n');
+const lines = text.split(/\r?\n/);
 const checks = expected.map(([version, date]) => ({
   id: `date-${version}`,
   pass: lines.includes(`## [${version}] - ${date}`),

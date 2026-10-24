@@ -22,7 +22,7 @@ const USAGE = `s20 runner
   preflight <experiment.yaml>                 resolve binary, version, pins and capabilities
   run <experiment.yaml> --dry-run             print resolved hashes, limits, capabilities and schedule
   run <experiment.yaml> [--out DIR] [--run-id ID]
-  run <experiment.yaml> --resume --run-id ID [--out DIR]
+  run <experiment.yaml> --resume --run-id ID [--out DIR] [--confirm-stopped ATTEMPT_ID,...]
   report <run-dir>                            recompute and print the summary
   export <run-dir> [--keep-labels] [--keep-check-details] [--out DIR]
                                               write a sanitized private staging bundle (not publication)`;
@@ -106,6 +106,7 @@ export async function main(argv: string[]): Promise<number> {
             runId: option(args, "--run-id"),
             dryRun: flag(args, "--dry-run"),
             resume: flag(args, "--resume"),
+            confirmStopped: (option(args, "--confirm-stopped") ?? "").split(",").filter(Boolean),
             cancel,
             log: out,
           });

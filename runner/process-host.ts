@@ -14,6 +14,8 @@ export interface HostLimits {
 }
 
 export interface HostCallbacks {
+  /** Called synchronously right after spawn with the child pid, before any output is read. */
+  onSpawn?: (pid: number) => void;
   /** Called per complete stdout line. Return true once the adapter has seen its first meaningful event. */
   onStdoutLine?: (line: string) => boolean | void;
   onStderrLine?: (line: string) => void;
@@ -156,6 +158,14 @@ export async function runHosted(
     return finish({ spawn_error: error instanceof Error ? error.message : String(error) });
   }
 
+  if (child.pid !== undefined) {
+    try {
+      callbacks.onSpawn?.(child.pid);
+    } catch {
+      /* the caller records its own failure; the process is still owned and is cleaned up below */
+    }
+  }
+
   return new Promise<HostResult>((resolvePromise) => {
     let settled = false;
     let killing: Promise<boolean> | null = null;
@@ -233,6 +243,14 @@ export async function runHosted(
       for (const t of timers) clearTimeout(t);
       const done = async () => {
         let cleanup: HostResult["cleanup"] = "not_needed";
+        // POSIX: a detached grandchild that closed its stdio could outlive a normal exit; signal the group (best effort).
+        if (!killing && process.platform !== "win32" && child.pid !== undefined) {
+          try {
+            process.kill(-child.pid, "SIGKILL");
+          } catch {
+            /* group already gone */
+          }
+        }
         if (killing) cleanup = (await killing) ? "confirmed" : "cleanup_pending";
         if (spawnError && child.pid === undefined) termination = "spawn_error";
         resolvePromise(finish({ exit_code: code, signal: signal ?? null, cleanup, spawn_error: spawnError, pid: child.pid ?? null }));

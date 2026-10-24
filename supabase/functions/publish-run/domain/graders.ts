@@ -79,6 +79,10 @@ export function graderDefErrors(defs: unknown): string[] {
         break;
       case "file_equals":
         pathCheck();
+        {
+          const e = relativePathError(d.expected);
+          if (e) errors.push(`${at}.expected: ${e}`);
+        }
         if (typeof d.normalize_line_endings !== "boolean") errors.push(`${at}.normalize_line_endings must be true or false`);
         break;
       case "command_exit":
@@ -129,7 +133,8 @@ export function evaluateGraders(defs: GraderDef[], snapshot: WorkspaceSnapshot):
         continue;
       }
       if (f.text === null) {
-        errors.push(`${d.id}: ${d.path} is too large or not UTF-8 text to evaluate`);
+        // Task output the agent produced; unreadable output is a failed check, not a grader defect.
+        pass(d, false, `${d.path} is too large or not UTF-8 text`);
         continue;
       }
       if (d.kind === "file_contains") {

@@ -161,9 +161,8 @@ class Parser {
       this.i += 1;
     }
     const preds: Pred[] = [];
-    let first = true;
-    while (this.i < this.src.length && (this.src[this.i] !== "]" || first)) {
-      first = false;
+    if (this.src[this.i] === "]") throw new PatternError("empty classes and a leading ] are not supported; escape ] as \\]");
+    while (this.i < this.src.length && this.src[this.i] !== "]") {
       const peek = this.src[this.i + 1];
       if (this.src[this.i] === "\\" && peek !== undefined && "dDwWsS".includes(peek)) {
         this.i += 1;

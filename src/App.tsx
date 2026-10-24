@@ -198,7 +198,7 @@ export function App() {
           {snapshotNote}
         </p>
       ) : null}
-      {snapshot ? <RunReport key={`snapshot-${snapshot.manifest.content_digest}`} summary={snapshot.summary} records={snapshot.records} manifest={snapshot.manifest} /> : null}
+      {snapshot ? <RunReport key={`snapshot-${snapshot.manifest.content_digest}`} idPrefix="snapshot" summary={snapshot.summary} records={snapshot.records} manifest={snapshot.manifest} /> : null}
 
       <section aria-labelledby="load-title">
         <h2 id="load-title">Load records</h2>

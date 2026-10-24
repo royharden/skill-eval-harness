@@ -16,13 +16,13 @@ const ATTESTATION_TEXT: Record<string, string> = {
   imported: "imported (owner claim, not execution proof)",
 };
 
-export function RunReport({ summary, records, manifest }: { summary: RunSummary; records: RunRecords; manifest: RunManifest | null }) {
+export function RunReport({ summary, records, manifest, idPrefix = "report" }: { summary: RunSummary; records: RunRecords; manifest: RunManifest | null; idPrefix?: string }) {
   const c = summary.counts;
   const u = summary.uncertainty;
   const treatment = records.spec.arms[1];
   return (
-    <section className="report" aria-labelledby="report-title">
-      <h2 id="report-title">{records.spec.experiment_id}</h2>
+    <section className="report" aria-labelledby={`${idPrefix}-title`}>
+      <h2 id={`${idPrefix}-title`}>{records.spec.experiment_id}</h2>
       {records.spec.notes ? <p className="banner">{records.spec.notes}</p> : null}
       <ul className="badges" aria-label="Provenance and capability">
         {summary.attestations.map((a) => (

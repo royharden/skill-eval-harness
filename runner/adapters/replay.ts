@@ -100,7 +100,8 @@ export const replayAdapter: Adapter = {
     const script = replayScriptPath(ctx.suite_root, ctx.task.descriptor.task_id, ctx.arm.arm_id, ctx.repeat_id);
     const cli = process.argv[1] ?? "";
     return {
-      argv: script ? [process.execPath, cli, "__replay-agent", script, ctx.paths.workspace] : [],
+      // execArgv keeps any loader flags (e.g. when the runner itself was started through a TS loader).
+      argv: script ? [process.execPath, ...process.execArgv, cli, "__replay-agent", script, ctx.paths.workspace] : [],
       env: ctx.env,
       cwd: ctx.paths.workspace,
       stdin: null,

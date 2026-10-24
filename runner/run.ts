@@ -60,6 +60,7 @@ async function detectCli(adapter: Adapter, dryRun: boolean): Promise<{ binary: s
   const argv = adapter.version_argv(binary);
   if (!argv) return { binary, version: null, problems };
   const r = await runHosted(argv, { cwd: process.cwd(), env: { PATH: process.env.PATH ?? "", SYSTEMROOT: process.env.SYSTEMROOT ?? "" }, stdin: null }, { first_event_timeout_ms: null, total_timeout_ms: 20_000, max_output_bytes: 64 * 1024 }, {}, makeCancelToken());
+  if (r.cleanup === "cleanup_pending") throw new RunError([`the ${binary} --version probe left a process whose exit could not be confirmed (pid ${r.pid ?? "unknown"}); stop it before running`]);
   const version = r.exit_code === 0 ? (r.stdout.trim().split(/\s+/).find((t) => /\d+\.\d+/.test(t)) ?? r.stdout.trim().slice(0, 64)) : null;
   if (!version) problems.push(`${binary} did not report a version`);
   return { binary, version, problems };
@@ -143,6 +144,7 @@ async function runAttempt(p: Prepared, store: RunStore, runId: string, side: Pla
   // Give the workspace its own git root so harness project discovery stops here (best effort, recorded).
   const git = await runHosted(["git", "init", "-q"], { cwd: workspace, env: { PATH: process.env.PATH ?? "", SYSTEMROOT: process.env.SYSTEMROOT ?? "" }, stdin: null }, { first_event_timeout_ms: null, total_timeout_ms: 15_000, max_output_bytes: 64 * 1024 }, {}, makeCancelToken());
   if (git.exit_code !== 0) errors.push("workspace git init was unavailable; the workspace has no git root of its own");
+  if (git.cleanup === "cleanup_pending") throw new RunError([`workspace git init left a process whose exit could not be confirmed (pid ${git.pid ?? "unknown"}); stop it, then resume (this attempt will be recorded as interrupted)`]);
   // Forced-content injects exact bounded content through the prompt and is distinct from native discovery.
   if (arm.arm_id === "treatment" && arm.exposure_mode !== "forced-content") {
     const place = adapter.placement(p.suite.candidate);
@@ -554,7 +556,7 @@ async function recover(store: RunStore, p: Prepared, runId: string, confirmStopp
     }
     const target = sides.find((s) => s.task_id === m.task_id && s.repeat_id === m.repeat_id && s.arm_id === m.arm_id);
     if (!target) continue;
-    const record: AttemptRecord = interruptedRecord(spec, p, runId, target, m.attempt_id, m.attempt_no, m.dispatched_at, evidenceFor(m.attempt_id));
+    const record: AttemptRecord = interruptedRecord(store, spec, p, runId, target, m.attempt_id, m.attempt_no, m.dispatched_at, evidenceFor(m.attempt_id));
     await store.writeAttempt(record);
     target.attempt_ids.push(m.attempt_id);
     target.state = "attempted";
@@ -571,7 +573,7 @@ async function recover(store: RunStore, p: Prepared, runId: string, confirmStopp
   return { ledger: edition, digest: await store.writeLedger(edition) };
 }
 
-function interruptedRecord(spec: ExperimentSpec, p: Prepared, runId: string, side: PlanSide, attemptId: string, attemptNo: number, dispatchedAt: string, cleanupEvidence: string): AttemptRecord {
+function interruptedRecord(store: RunStore, spec: ExperimentSpec, p: Prepared, runId: string, side: PlanSide, attemptId: string, attemptNo: number, dispatchedAt: string, cleanupEvidence: string): AttemptRecord {
   const task = p.suite.tasks.find((t) => t.descriptor.task_id === side.task_id)!;
   const arm = side.arm_id === "baseline" ? spec.arms[0] : spec.arms[1];
   return {
@@ -609,7 +611,7 @@ function interruptedRecord(spec: ExperimentSpec, p: Prepared, runId: string, sid
     duration_ms: null,
     cleanup: "confirmed",
     retry_qualified: false,
-    errors: [cleanupEvidence],
+    errors: [cleanupEvidence, ...(existsSync(resolve(store.path("traces"), `${attemptId}.log`)) ? [`a private trace for this attempt exists at traces/${attemptId}.log (not linked; written before the interruption)`] : [])],
     attestation: spec.harness_id === "replay" ? "replay-synthetic" : "runner",
   };
 }

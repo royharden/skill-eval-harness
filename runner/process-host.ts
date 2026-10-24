@@ -43,24 +43,37 @@ export interface HostResult {
 
 export interface CancelToken {
   cancelled: boolean;
-  onCancel(fn: () => void): void;
+  /** Registers a handler; returns an unsubscribe function that must be called when the owner settles. */
+  onCancel(fn: () => void): () => void;
 }
 
 export function makeCancelToken(): CancelToken & { cancel(): void } {
-  const handlers: Array<() => void> = [];
+  const handlers = new Set<() => void>();
   const token = {
     cancelled: false,
     onCancel(fn: () => void) {
-      if (token.cancelled) fn();
-      else handlers.push(fn);
+      if (token.cancelled) {
+        fn();
+        return () => undefined;
+      }
+      handlers.add(fn);
+      return () => {
+        handlers.delete(fn);
+      };
     },
     cancel() {
       if (token.cancelled) return;
       token.cancelled = true;
-      for (const fn of handlers.splice(0)) fn();
+      const list = [...handlers];
+      handlers.clear();
+      for (const fn of list) fn();
     },
   };
   return token;
+}
+
+function leaderExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
 }
 
 function waitExit(child: ChildProcess, ms: number): Promise<boolean> {
@@ -74,7 +87,6 @@ function waitExit(child: ChildProcess, ms: number): Promise<boolean> {
   });
 }
 
-/** Terminates the whole owned process tree and reports whether exit was confirmed. */
 /** POSIX group state: "empty" (no members), "members", or "unknown" (cannot probe). */
 function groupState(pgid: number): "empty" | "members" | "unknown" {
   try {
@@ -107,10 +119,14 @@ export async function reapGroup(pgid: number, confirmMs: number): Promise<"empty
   return "stuck";
 }
 
+/** Terminates the whole owned process tree and reports whether exit was confirmed. */
 export async function killTree(child: ChildProcess, confirmMs: number): Promise<boolean> {
   const pid = child.pid;
   if (pid === undefined) return true;
   if (process.platform === "win32") {
+    // Once the leader has exited its pid may already belong to an unrelated process: never taskkill it by pid.
+    // The tree cannot be confirmed from here, so report unconfirmed (caller records cleanup_pending).
+    if (leaderExited(child)) return false;
     await new Promise<void>((resolve) => {
       const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { shell: false, windowsHide: true, stdio: "ignore" });
       killer.once("error", () => resolve());
@@ -202,8 +218,25 @@ export async function runHosted(
     const timers: Array<ReturnType<typeof setTimeout>> = [];
     let spawnError: string | null = null;
 
+    let unsubscribe: () => void = () => undefined;
+    let watchdog: ReturnType<typeof setInterval> | null = null;
+    const settle = (result: HostResult) => {
+      if (settled) return;
+      settled = true;
+      for (const t of timers) clearTimeout(t);
+      if (watchdog) clearInterval(watchdog);
+      unsubscribe();
+      resolvePromise(result);
+    };
+    const releasePipes = () => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      child.unref();
+    };
+
     const stop = (why: HostTermination) => {
-      if (killing) return;
+      // Never signal after this attempt settled: its pid may be reused by an unrelated process.
+      if (killing || settled) return;
       termination = why;
       killing = killTree(child, confirmMs);
     };
@@ -262,14 +295,15 @@ export async function runHosted(
       }, limits.first_event_timeout_ms));
     }
     timers.push(setTimeout(() => stop("total_timeout"), limits.total_timeout_ms));
-    cancel.onCancel(() => stop("cancelled"));
+    unsubscribe = cancel.onCancel(() => stop("cancelled"));
 
     child.once("error", (error) => {
       spawnError = error.message;
     });
+    let closed = false;
     child.once("close", (code, signal) => {
-      if (settled) return;
-      settled = true;
+      if (settled || closed) return;
+      closed = true;
       for (const t of timers) clearTimeout(t);
       const done = async () => {
         let cleanup: HostResult["cleanup"] = "not_needed";
@@ -280,30 +314,43 @@ export async function runHosted(
           cleanup = group === "empty" ? "not_needed" : group === "reaped" ? "confirmed" : "cleanup_pending";
         }
         if (spawnError && child.pid === undefined) termination = "spawn_error";
-        resolvePromise(finish({ exit_code: code, signal: signal ?? null, cleanup, spawn_error: spawnError, pid: child.pid ?? null }));
+        settle(finish({ exit_code: code, signal: signal ?? null, cleanup, spawn_error: spawnError, pid: child.pid ?? null }));
       };
       void done();
+    });
+    // Leader exited but "close" does not follow (a descendant holds the pipes): settle promptly instead of waiting
+    // for the deadline. POSIX reaps and confirms the group; Windows cannot confirm the tree.
+    child.once("exit", (code, signal) => {
+      setTimeout(() => {
+        if (settled || closed || killing) return;
+        const finishExit = async () => {
+          let cleanup: HostResult["cleanup"] = "cleanup_pending";
+          if (process.platform !== "win32" && child.pid !== undefined) {
+            const group = await reapGroup(child.pid, confirmMs);
+            cleanup = group === "stuck" ? "cleanup_pending" : "confirmed";
+          }
+          if (settled || closed) return;
+          for (const t of timers) clearTimeout(t);
+          releasePipes();
+          settle(finish({ exit_code: code, signal: signal ?? null, cleanup, spawn_error: spawnError, pid: child.pid ?? null }));
+        };
+        void finishExit();
+      }, Math.min(2000, confirmMs));
     });
     // After a kill, "close" may never fire (unconfirmed exit, or a surviving descendant still holds the pipes).
     // Settle with cleanup_pending after one more confirmation window so scheduling stops instead of hanging.
     let watching = false;
-    const watchdog = setInterval(() => {
+    watchdog = setInterval(() => {
       if (settled || !killing || watching) return;
       watching = true;
       void killing.then(() => {
         setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          clearInterval(watchdog);
-          for (const t of timers) clearTimeout(t);
+          if (settled || closed) return;
           // Release our ends so a descendant holding the pipes cannot keep the runner alive.
-          child.stdout?.destroy();
-          child.stderr?.destroy();
-          child.unref();
-          resolvePromise(finish({ exit_code: child.exitCode, cleanup: "cleanup_pending", pid: child.pid ?? null }));
+          releasePipes();
+          settle(finish({ exit_code: child.exitCode, cleanup: "cleanup_pending", pid: child.pid ?? null }));
         }, confirmMs);
       });
     }, 250);
-    child.once("close", () => clearInterval(watchdog));
   });
 }

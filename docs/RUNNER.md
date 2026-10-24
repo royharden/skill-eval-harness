@@ -98,7 +98,8 @@ established for a `cleanup_pending` attempt is recorded in `cleanup/<attempt_id>
 finalize (the attempt itself stays an operational exclusion). Finalized attempts
 written after the last edition are adopted; dispatched-but-unfinalized attempts are recorded as `cancelled`
 (action history unknown, never retried automatically); a recovery edition references its predecessor. Measured
-outcomes are never overwritten.
+outcomes are never overwritten. With `max_tokens` set, an interrupted or cancelled record has unknown usage, so a
+resume stops new work at the first side and finalizes with the remaining sides `not_started` (stop-new-work rule).
 
 ## Isolation (trusted mode only)
 

@@ -79,14 +79,18 @@ export async function captureSnapshot(
       { onSpawn: (pid) => onGraderSpawn?.(g.id, pid) },
       makeCancelToken(),
     );
-    if (result.cleanup === "cleanup_pending") onCleanupPending?.(result.pid);
+    if (result.cleanup === "cleanup_pending") {
+      onCleanupPending?.(result.pid);
+      commands[g.id] = { exit_code: result.exit_code, stdout: result.stdout, stderr: result.stderr.slice(0, 4096), timed_out: result.termination === "total_timeout", truncated: result.truncated, spawn_error: "grader process cleanup was not confirmed" };
+      break; // do not start more graders while one may still be running in the workspace
+    }
     commands[g.id] = {
       exit_code: result.exit_code,
       stdout: result.stdout,
       stderr: result.stderr.slice(0, 4096),
       timed_out: result.termination === "total_timeout",
       truncated: result.truncated,
-      spawn_error: result.spawn_error ?? (result.termination === "spawn_error" ? "spawn failed" : result.cleanup === "cleanup_pending" ? "grader process cleanup was not confirmed" : null),
+      spawn_error: result.spawn_error ?? (result.termination === "spawn_error" ? "spawn failed" : null),
     };
   }
   return { files, commands, expected: { ...expected } };

@@ -1,0 +1,20 @@
+id: changelog-heading
+label: Add the 1.4.0 release entry in house heading style
+prompt_file: prompt.md
+fixture: fixture
+oracle: oracle
+grader_timeout_ms: 30000
+graders:
+  - id: changelog-exists
+    kind: file_exists
+    path: CHANGELOG.md
+  - id: heading-style
+    kind: file_contains
+    path: CHANGELOG.md
+    pattern: '^## \[1\.4\.0\] - 2026-10-23$'
+    flags: m
+  - id: resize-entry
+    kind: file_contains
+    path: CHANGELOG.md
+    pattern: '^- `resize\(\)`'
+    flags: m

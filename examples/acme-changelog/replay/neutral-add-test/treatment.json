@@ -1,0 +1,18 @@
+{
+  "schema": "s20.replay.v1",
+  "note": "synthetic replay — not measured agent behavior",
+  "steps": [
+    { "event": { "type": "start", "model": "replay-model", "cli_version": "replay-1" } },
+    { "event": { "type": "exposure", "mechanism": "native-invocation", "artifact": "SKILL.md" } },
+    {
+      "write": {
+        "path": "test/parse.test.js",
+        "content": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { parseSize } from '../src/parse.js';\n\ntest('parseSize reads WIDTHxHEIGHT', () => {\n  assert.deepStrictEqual(parseSize('120x40'), { width: 120, height: 40 });\n});\n\ntest('parseSize rejects malformed input', () => {\n  assert.throws(() => parseSize('wide'), TypeError);\n});\n"
+      }
+    },
+    { "sleep_ms": 50 },
+    { "event": { "type": "usage", "input_tokens": 1760, "output_tokens": 230, "cost_usd": 0.0088 } },
+    { "event": { "type": "result", "status": "success" } },
+    { "exit": 0 }
+  ]
+}

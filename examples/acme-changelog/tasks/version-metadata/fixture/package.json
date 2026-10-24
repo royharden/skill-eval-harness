@@ -1,0 +1,7 @@
+{
+  "name": "acme-widgets",
+  "version": "1.3.0",
+  "description": "Tiny geometry helpers for rectangular widgets.",
+  "type": "module",
+  "license": "MIT"
+}

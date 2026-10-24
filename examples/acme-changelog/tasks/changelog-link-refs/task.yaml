@@ -1,0 +1,14 @@
+id: changelog-link-refs
+label: Update the changelog compare links for the 1.4.0 release
+prompt_file: prompt.md
+fixture: fixture
+oracle: oracle
+grader_timeout_ms: 30000
+graders:
+  - id: changelog-exists
+    kind: file_exists
+    path: CHANGELOG.md
+  - id: compare-links
+    kind: command_exit
+    argv: ["{node}", "{task}/graders/check-links.mjs", "{workspace}"]
+    expect_exit: 0

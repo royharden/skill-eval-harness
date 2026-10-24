@@ -1,0 +1,14 @@
+id: changelog-date-format
+label: Normalize release dates in the changelog
+prompt_file: prompt.md
+fixture: fixture
+oracle: oracle
+grader_timeout_ms: 30000
+graders:
+  - id: changelog-exists
+    kind: file_exists
+    path: CHANGELOG.md
+  - id: date-style-score
+    kind: json_score
+    argv: ["{node}", "{task}/graders/score-dates.mjs", "{workspace}"]
+    threshold: 1

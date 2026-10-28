@@ -6,3 +6,14 @@ dist/
 *.log
 .DS_Store
 dist-runner/
+
+# Local credentials and generated artifacts
+.creds/
+ArchiveManager-creds.txt
+*.pem
+*.key
+*.p12
+*.pfx
+*.zip
+.cache/
+coverage/

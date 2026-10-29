@@ -1,0 +1,19 @@
+# TEMPLATE ONLY. Do not run until Roy authorizes activation and supplies: a pinned model id, the machine/account,
+# the auth channel (ANTHROPIC_API_KEY passed to the child by name) and explicit spend/attempt limits.
+# Set CLAUDE_BIN to the real executable (not a .cmd/.ps1 shim). The adapter contract is a hypothesis.
+experiment_id: acme-skill-claude
+suite: ../acme-changelog
+harness: claude-code
+model: PIN-A-MODEL-ID-AT-ACTIVATION
+effort: null
+repeats: 3
+scheduling_seed: 20261023
+exposure_mode: native
+startup_retries: 0
+estimate_usd_per_side: null      # required once max_usd is set
+environment_allowlist: []
+output_root: null
+limits:
+  max_usd: null                  # set explicitly at activation
+  max_attempts: 36
+notes: "Live Claude Code run; requires separate authorization."

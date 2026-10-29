@@ -1,0 +1,17 @@
+{
+  "schema": "s20.replay.v1",
+  "note": "synthetic replay — not measured agent behavior",
+  "steps": [
+    { "event": { "type": "start", "model": "replay-model", "cli_version": "replay-1" } },
+    {
+      "write": {
+        "path": "test/parse.test.js",
+        "content": "import { test } from 'node:test';\nimport assert from 'node:assert';\nimport { parseSize } from '../src/parse.js';\n\ntest('parseSize splits width and height', () => {\n  assert.strictEqual(parseSize('3x4').width, 3);\n  assert.strictEqual(parseSize('3x4').height, 4);\n});\n"
+      }
+    },
+    { "sleep_ms": 50 },
+    { "event": { "type": "usage", "input_tokens": 1020, "output_tokens": 190, "cost_usd": 0.0059 } },
+    { "event": { "type": "result", "status": "success" } },
+    { "exit": 0 }
+  ]
+}

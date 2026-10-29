@@ -1,47 +1,82 @@
 # Skill eval harness
 
-A small web app for paired measurements of instruction files. It compares a baseline (no file) with `SKILL.md`, `AGENTS.md`, and `CLAUDE.md` on the same tasks and seeds, for Claude Code and Codex records.
+Does this exact instruction artifact change a real coding-agent CLI's results on my chosen tasks, and at what token,
+time and monetary cost?
 
-The headline numbers are a Wilson interval on each pass rate, an exact McNemar test on the flips, a task-clustered bootstrap of the pass-rate difference, USD and tokens per passing trial, and a check that the instruction file was actually loaded. A point estimate is not a winner. The paired interval has to be non-degenerate and sit entirely above or below zero.
+The harness compares one no-artifact **baseline** with one **treatment** (a complete `SKILL.md` bundle, an
+`AGENTS.md` or a `CLAUDE.md`, only for a harness/file combination that is supported) on your own trusted tasks,
+with deterministic graders, paired repeats and honest uncertainty. It has three parts that share one
+environment-neutral domain (`supabase/functions/publish-run/domain/`):
 
-Records are owner-supplied. This app does not launch an agent, call a model, or invent a pass when a key is missing.
+1. **Offline report (browser, Vite + React).** Load the labelled synthetic sample or import a bundle. See planned,
+   attempted and not-started sides, complete pairs, helpful/harmful flips, the task-weighted effect, an empirical
+   task-cluster bootstrap interval, an exact McNemar test on predeclared repeat 0 only, operational failures,
+   exposure evidence and cost coverage. Preview and download a sanitized export. No login or database needed.
+2. **Local runner (Node CLI, `runner/`).** Validate a trusted suite (oracle must pass, untouched fixture must fail),
+   dry-run a resolved experiment, replay synthetic events through the real scheduler, process host, graders and
+   writer, and — only after separately authorized activation — run Claude Code or Codex as separate pinned experiments.
+3. **Optional persistence (Bolt Database).** Save an immutable run edition, then ask `publish-run` to recompute and
+   sanitize it into a public or private snapshot at `#pub=<id>`. Neither login nor database gates offline analysis.
 
-## What is built
+No winner badge is computed. The report always shows the observed direction, and says when the interval is
+unavailable, degenerate or includes zero. Results apply only to the selected suite and recorded environment.
 
-- Pure comparison, pin checks, and a deterministic grader over a workspace snapshot (file exists, file contains, command exit code, JSON score).
-- Planner functions for a later Claude Code or Codex host. They return an unverified command contract or an error that names the missing variable. They do not spawn a process.
-- A sample record you can preview in the browser without a database.
-- SQL for owner-scoped suites and trials, with forced row-level security, and an immutable publication written only by the `publish-run` function after it recomputes the summary.
-- Email/password sign-in, save, and publish once a Bolt Database project is configured.
+## What is built — and what has not run
 
-## What has not been run
+**Dirty Mode construction (2026-10-23). Source written and statically inspected. No build, test, CLI, migration or browser run has been executed; only static type checks ran.**
 
-Dirty Mode construction. No install, typecheck, unit test, Vite build, migration, function deploy, or browser session has been executed in this repo. The lockfile is not committed. CLI flags in the planners are an unverified contract. See `DEVELOPMENT-STATUS.md` and `BOLT-HANDOFF.md`.
+| Area | Built (source) | Not yet run |
+|---|---|---|
+| v2 contracts, validators, canonical JSON, digests, pairing, retry selection | yes | unit tests |
+| Statistics (task mean, Wilson, cluster bootstrap, repeat-0 McNemar, cost coverage) | yes | unit tests, independent numeric cross-check |
+| Manifests, envelope verification, sanitized export | yes | unit tests |
+| Browser report, import, export, auth, save/publish, `#pub=` view | yes | `vite build`, any browser session |
+| Runner: suite loader, graders, capture, validate, dry run, scheduler, process host, store, budgets, resume, replay | yes | `build:runner`, any CLI command, replay run |
+| Claude Code and Codex adapters | yes, **hypothesis contracts** | any real CLI invocation; flags/events/discovery roots are unverified |
+| Forward migration, `publish-run` v2 | yes | migration apply, function deploy, RLS tests |
 
-## Demo, local preview
+Static checks that did run (at commit `3bfb0fe`, 2026-10-24): a no-emit type check of the domain, runner and tests
+with an out-of-tree TypeScript 6.0.3 (this repo pins `typescript ^5.7.3`, so rerun with the installed version), using
+`@types/node` and a type-only `yaml` shim, plus checks of the React UI and the Deno handler against scratch type
+shims. All reported no errors. Those are type checks, not builds or tests. No dependency has been installed and there is no lockfile. See `DEVELOPMENT-STATUS.md`.
 
-1. Open the app. With no `VITE_SUPABASE_URL` or `VITE_SUPABASE_ANON_KEY`, it shows the setup panel and does not invent a project URL.
-2. Choose **Show sample records**. The sample is synthetic: two tasks, two seeds, a skill file, and an `AGENTS.md` file. One skill trial is marked not loaded.
-3. Read the pass rates, intervals, flips, verdict, cost per passing trial, and the loaded-file warning.
+## First journey (written, not exercised)
 
-Saving and publishing need the database path in `BOLT-HANDOFF.md`. After sign-in, **Save suite** stores the record and **Publish snapshot** asks `publish-run` to recompute it. A public snapshot opens at `#pub=<id>`.
+1. `npm run dev`, open the page, click **Load synthetic sample**. The sample is fabricated: it shows flips, ties,
+   a task timeout, a missing side, a grader error and unknown cost. It is not measured agent behavior.
+2. `npm run build:runner`, then `npm run cli -- validate examples/acme-changelog`.
+3. `npm run cli -- run examples/experiments/acme-replay.yaml --dry-run`, then without `--dry-run` and with
+   `--out <a folder outside any git repo>`. Import `<run>/bundle.private.json` into the page, or
+   `npm run cli -- export <run-dir>` for a sanitized bundle.
+4. Live Claude Code / Codex runs need the owner's pinned model ids, machine/account, auth channel and explicit spend and
+   attempt limits first. Nothing in this repo authorizes spend.
 
-## Scripts
-
-After a later `npm install` (the lockfile is deliberately absent):
+## Scripts (after a later, authorized `npm install`)
 
 ```text
-npm run dev
-npm run typecheck
-npm test
-npm run build
+npm run typecheck          # browser + domain (tsc --noEmit)
+npm run typecheck:runner   # runner + domain + tests with Node types
+npm test                   # vitest run
+npm run build              # Vite -> dist/
+npm run build:runner       # esbuild -> dist-runner/cli.mjs
+npm run cli -- <command>   # validate | preflight | run [--dry-run|--resume] | report | export
 ```
 
-Do not treat a missing run of those commands as a pass.
+A skipped or failed command is not a pass.
+
+## Docs
+
+- `docs/STATISTICS.md` — the method actually implemented (s20.taskmean.v1).
+- `docs/RUN-RECORD.md` — the v2 record, ledger, manifest and envelope shapes, plus the legacy v1 importer.
+- `docs/SUITE-FORMAT.md` — suite, task, grader and replay file formats.
+- `docs/RUNNER.md` — runner commands, isolation limits, budgets, resume and adapter capability status.
+- `BOLT-HANDOFF.md` — optional Bolt Database provisioning inventory.
 
 ## Prior art
 
-The paired design follows public ideas from Waza, skillgrade, SkillsBench, benchtrace, and paired-eval. No source from those projects is copied. `docs/STATISTICS.md` states the rules this repo actually implements. `docs/RUN-RECORD.md` is the import shape.
+Ideas (not code) from Waza, skillgrade, SkillsBench, paired-eval/benchtrace and claude-ablation-lab: separate
+executor/grader/report, oracle/null gate, startup watchdog, deterministic checks, paired outcomes, task-cluster
+resampling, exposure evidence. The example suite is original fictional content.
 
 ## License
 

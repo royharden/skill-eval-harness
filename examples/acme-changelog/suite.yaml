@@ -1,0 +1,13 @@
+suite_id: acme-changelog
+version: "1"
+description: Fictional changelog and version-metadata conventions for the toy acme-widgets library.
+tasks:
+  - changelog-heading
+  - changelog-date-format
+  - changelog-link-refs
+  - version-metadata
+  - neutral-fix-typo
+  - neutral-add-test
+candidate:
+  kind: skill
+  path: skill/acme-changelog

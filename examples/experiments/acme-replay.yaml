@@ -1,0 +1,18 @@
+# No-spend synthetic replay of the acme-changelog suite through the real runner pipeline.
+# Run: npm run cli -- run examples/experiments/acme-replay.yaml --out <folder outside any git repo>
+experiment_id: acme-skill-replay
+suite: ../acme-changelog
+harness: replay
+model: replay-model
+effort: null
+repeats: 3
+scheduling_seed: 20261023
+exposure_mode: native
+startup_retries: 0
+estimate_usd_per_side: null
+environment_allowlist: []
+output_root: null
+limits:
+  agent_timeout_ms: 20000
+  first_event_timeout_ms: 10000
+notes: "Synthetic replay: scripted events and file writes, not measured agent behavior."

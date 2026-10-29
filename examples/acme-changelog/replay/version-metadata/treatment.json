@@ -1,0 +1,19 @@
+{
+  "schema": "s20.replay.v1",
+  "note": "synthetic replay — not measured agent behavior",
+  "steps": [
+    { "event": { "type": "start", "model": "replay-model", "cli_version": "replay-1" } },
+    { "event": { "type": "exposure", "mechanism": "native-invocation", "artifact": "SKILL.md" } },
+    {
+      "write": {
+        "path": "package.json",
+        "content": "{\n  \"name\": \"acme-widgets\",\n  \"version\": \"1.4.0\",\n  \"description\": \"Tiny geometry helpers for rectangular widgets.\",\n  \"type\": \"module\",\n  \"license\": \"MIT\"\n}\n"
+      }
+    },
+    { "write": { "path": "VERSION", "content": "1.4.0\n" } },
+    { "sleep_ms": 50 },
+    { "event": { "type": "usage", "input_tokens": 1650, "output_tokens": 160, "cost_usd": 0.0078 } },
+    { "event": { "type": "result", "status": "success" } },
+    { "exit": 0 }
+  ]
+}

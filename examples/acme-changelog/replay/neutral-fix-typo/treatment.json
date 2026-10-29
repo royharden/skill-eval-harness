@@ -1,0 +1,18 @@
+{
+  "schema": "s20.replay.v1",
+  "note": "synthetic replay — not measured agent behavior",
+  "steps": [
+    { "event": { "type": "start", "model": "replay-model", "cli_version": "replay-1" } },
+    { "event": { "type": "exposure", "mechanism": "native-invocation", "artifact": "SKILL.md" } },
+    {
+      "write": {
+        "path": "README.md",
+        "content": "# acme-widgets\n\nAcme Widgets is a tiny library of geometry helpers for rectangular widgets.\n\nSee CHANGELOG.md for release notes.\n"
+      }
+    },
+    { "sleep_ms": 50 },
+    { "event": { "type": "usage", "input_tokens": 1430, "output_tokens": 85, "cost_usd": 0.0060 } },
+    { "event": { "type": "result", "status": "success" } },
+    { "exit": 0 }
+  ]
+}

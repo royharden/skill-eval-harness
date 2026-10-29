@@ -1,0 +1,15 @@
+{
+  "schema": "s20.replay.v1",
+  "note": "synthetic replay — not measured agent behavior; repeat 1 deliberately hangs before usage/result (timeout, unknown cost)",
+  "steps": [
+    { "event": { "type": "start", "model": "replay-model", "cli_version": "replay-1" } },
+    { "event": { "type": "exposure", "mechanism": "native-invocation", "artifact": "SKILL.md" } },
+    {
+      "write": {
+        "path": "package.json",
+        "content": "{\n  \"name\": \"acme-widgets\",\n  \"version\": \"1.4.0\",\n  \"description\": \"Tiny geometry helpers for rectangular widgets.\",\n  \"type\": \"module\",\n  \"license\": \"MIT\"\n}\n"
+      }
+    },
+    { "hang": true }
+  ]
+}

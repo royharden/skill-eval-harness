@@ -1,0 +1,20 @@
+# TEMPLATE ONLY. Do not run until Roy authorizes activation and supplies: a pinned model id, the machine/account,
+# the auth channel (OPENAI_API_KEY passed to the child by name) and explicit spend/attempt limits.
+# Set CODEX_BIN to the real executable (not a .cmd/.ps1 shim). The adapter contract is a hypothesis.
+# Codex reports no cost: cost stays unknown and cost ratios are suppressed unless an owner pins rates later.
+experiment_id: acme-skill-codex
+suite: ../acme-changelog
+harness: codex
+model: PIN-A-MODEL-ID-AT-ACTIVATION
+effort: null
+repeats: 3
+scheduling_seed: 20261023
+exposure_mode: native
+startup_retries: 0
+estimate_usd_per_side: null
+environment_allowlist: []
+output_root: null
+limits:
+  max_usd: null
+  max_attempts: 36
+notes: "Live Codex run; requires separate authorization."
